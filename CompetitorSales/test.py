@@ -87,8 +87,20 @@ def main():
             print(f"\n{formatted_date}の予約状況を確認中...")
             
             try:
-                # 該当する日付ボタンを探してクリック
+                # 該当する日付ボタンを探す
                 date_button = page.locator(f'button[aria-label="{date_str}"]')
+                
+                # 日付ボタンが見つからない場合は次の月に移動
+                if date_button.count() == 0:
+                    print(f"{formatted_date}のボタンが見つかりません。次の月に移動します...")
+                    next_month_button = page.locator('button[aria-label="次の月"]')
+                    next_month_button.click()
+                    time.sleep(2)  # 月の切り替えを待機
+                    
+                    # 日付ボタンを再度探す
+                    date_button = page.locator(f'button[aria-label="{date_str}"]')
+                
+                # 日付ボタンをクリック
                 date_button.click()
                 
                 # 日付選択後の更新を待つ
