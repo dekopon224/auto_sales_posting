@@ -1,60 +1,107 @@
 import boto3
 import json
+import re
+import hashlib
 from datetime import datetime, timedelta, timezone
 import time
 from playwright.sync_api import sync_playwright
 
+# DynamoDB テーブル名
+TABLE_NAME = 'CompetitorSales'
+
 def lambda_handler(event, context):
-    # APIリクエストからURLを取得
+    # URL パラメータ取得
     if 'body' in event:
-        try:
-            body = json.loads(event['body'])
-            url = body.get('url')
-        except:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'Invalid request body'
-                })
-            }
+        body = json.loads(event['body'] or '{}')
+        url = body.get('url')
     else:
-        # テスト時などの直接呼び出し
         url = event.get('url')
-    
-    # URLが指定されていない場合はエラー
     if not url:
-        return {
-            'statusCode': 400,
-            'body': json.dumps({
-                'error': 'URL parameter is required'
-            })
-        }
+        return { 'statusCode': 400, 'body': json.dumps({'error': 'URL is required'}) }
 
+    # スクレイピング
+    reservation_data = get_reservation_data(url)
+    if 'error' in reservation_data:
+        return { 'statusCode': 500, 'body': json.dumps(reservation_data, ensure_ascii=False) }
+
+    # DynamoDB へ保存
     try:
-        # Playwrightを使用して予約情報とプラン情報を取得
-        reservation_data = get_reservation_data(url)
-        
-        # JSTで現在時刻を取得
-        JST = timezone(timedelta(hours=9))
-        now = datetime.now(JST)
-        
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': f"データを {now.strftime('%Y-%m-%d %H:%M:%S')} に取得しました。",
-                'data': reservation_data
-            }, ensure_ascii=False)
-        }
-
+        write_to_dynamodb(url, reservation_data)
     except Exception as e:
-        import traceback
         return {
             'statusCode': 500,
-            'body': json.dumps({
-                'error': f"エラーが発生しました: {str(e)}",
-                'traceback': traceback.format_exc()
-            }, ensure_ascii=False)
+            'body': json.dumps({'error': f"DynamoDB書き込み失敗: {e}"}, ensure_ascii=False)
         }
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': '保存完了', 'records': reservation_data}, ensure_ascii=False)
+    }
+
+
+def write_to_dynamodb(url, data):
+    """
+    reservation_data の構造
+      {
+        'url': ...,
+        'plans': [ {'name': planDisplayName, 'price': priceStr}, ... ],
+        'reserved_times': {
+           '5月17日': [ {'start_time':'10:00','end_time':'11:00',…}, … ],
+           …
+        },
+        'timestamp': '2025-05-16T08:00:00+09:00'
+      }
+    を展開して、CompetitorSales テーブルへ put_item します。
+    """
+    # DynamoDB Table
+    dynamo = boto3.resource('dynamodb')
+    table = dynamo.Table(TABLE_NAME)
+
+    # URLからroomIdを抽出
+    room_id_match = re.search(r'/rooms/([^/]+)', url)
+    if room_id_match:
+        space_id = room_id_match.group(1)
+    else:
+        # 抽出できない場合はURLからハッシュを生成
+        space_id = "unknown_" + hashlib.md5(url.encode('utf-8')).hexdigest()[:10]
+
+    # 今の JST 年
+    JST = timezone(timedelta(hours=9))
+    now_jst = datetime.now(JST)
+
+    for plan in data['plans']:
+        disp_name = plan['name']
+        # 数字だけ抜き出して int に (「¥1,000」→1000)
+        price = int(re.sub(r'\D', '', plan['price'])) if plan['price'] else 0
+
+        # planId を MD5 で固定生成
+        plan_id = 'plan_' + hashlib.md5(disp_name.encode('utf-8')).hexdigest()[:8]
+
+        # 各日付の予約帯を展開
+        for formatted_date, ranges in data['reserved_times'].items():
+            # "5月17日" → (month, day)
+            m, d = map(int, re.match(r'(\d+)月(\d+)日', formatted_date).groups())
+            year = now_jst.year
+            reservation_date = f"{year}-{m:02d}-{d:02d}"
+
+            for slot in ranges:
+                sk = f"{plan_id}#{reservation_date}#{slot['start_time']}"
+
+                item = {
+                    'spaceId':       space_id,
+                    'sortKey':       sk,
+                    'planId':        plan_id,
+                    'planDisplayName': disp_name,
+                    'reservationDate': reservation_date,
+                    'start_time':    slot['start_time'],
+                    'end_time':      slot['end_time'],
+                    'price':         price,
+                    'created_at':    now_jst.isoformat()
+                }
+                # 必要に応じて他属性（name, url, holiday…）もここに追加
+
+                # DynamoDB に書き込み
+                table.put_item(Item=item)
 
 def get_reservation_data(url):
     """Playwrightを使用して予約情報とプラン情報を取得する関数"""
