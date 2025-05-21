@@ -19,3 +19,13 @@ docker tag competitorsales:latest 897729114300.dkr.ecr.ap-northeast-1.amazonaws.
 aws ecr get-login-password --region ap-northeast-1 --profile goburin | docker login --username AWS --password-stdin 897729114300.dkr.ecr.ap-northeast-1.amazonaws.com
 
 docker push 897729114300.dkr.ecr.ap-northeast-1.amazonaws.com/competitorsales:latest
+
+# ビルド手順 SpaceRate
+
+docker build --no-cache --platform=linux/amd64 -t spacerate .
+
+docker tag spacerate:latest 897729114300.dkr.ecr.ap-northeast-1.amazonaws.com/spacerate:latest
+
+aws ecr get-login-password --region ap-northeast-1 --profile goburin | docker login --username AWS --password-stdin 897729114300.dkr.ecr.ap-northeast-1.amazonaws.com
+
+docker push 897729114300.dkr.ecr.ap-northeast-1.amazonaws.com/spacerate:latest

@@ -87,6 +87,21 @@ def write_to_dynamodb(url, data):
             for slot in ranges:
                 sk = f"{plan_id}#{reservation_date}#{slot['start_time']}"
 
+                # 修正：利用時間を計算
+                start_hour, start_minute = map(int, slot['start_time'].split(':'))
+                end_hour, end_minute = map(int, slot['end_time'].split(':'))
+                
+                # 修正：翌日に跨る場合の対応
+                if end_hour < start_hour:
+                    end_hour += 24
+                    
+                start_minutes = start_hour * 60 + start_minute
+                end_minutes = end_hour * 60 + end_minute
+                usage_hours = (end_minutes - start_minutes) / 60  # 時間単位の利用時間
+                
+                # 修正：利用時間に基づいて価格を計算
+                total_price = int(price * usage_hours)
+
                 item = {
                     'spaceId':       space_id,
                     'sortKey':       sk,
@@ -95,8 +110,10 @@ def write_to_dynamodb(url, data):
                     'reservationDate': reservation_date,
                     'start_time':    slot['start_time'],
                     'end_time':      slot['end_time'],
-                    'price':         price,
-                    'created_at':    now_jst.isoformat()
+                    'price':         total_price,  # 修正：単価ではなく総額
+                    'created_at':    now_jst.isoformat(),
+                    'url':           url,          # 修正：URLを追加
+                    'name':          data.get('name', '')  # 修正：施設名を追加
                 }
                 # 必要に応じて他属性（name, url, holiday…）もここに追加
 
@@ -137,6 +154,15 @@ def get_reservation_data(url):
             # ページの読み込みを待機
             page.wait_for_load_state("networkidle")
             time.sleep(3)
+            
+            # 修正：スペース名を取得
+            space_name = None
+            try:
+                space_name_element = page.query_selector("p.css-4mpmt5")
+                if space_name_element:
+                    space_name = space_name_element.inner_text()
+            except Exception as e:
+                print(f"スペース名の取得中にエラーが発生しました: {e}")
             
             # 2週間分の日付を生成
             today = datetime.now(timezone(timedelta(hours=9)))  # JST
@@ -281,7 +307,8 @@ def get_reservation_data(url):
                 'url': url,
                 'plans': plans,
                 'reserved_times': all_reserved_times,
-                'timestamp': datetime.now(timezone(timedelta(hours=9))).isoformat()
+                'timestamp': datetime.now(timezone(timedelta(hours=9))).isoformat(),
+                'name': space_name  # 修正：施設名を追加
             }
             
             return result
