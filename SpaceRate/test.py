@@ -1,6 +1,7 @@
 from playwright.sync_api import sync_playwright
 import time
 from datetime import datetime, timedelta
+import pandas as pd
 
 def main():
     # Playwrightを初期化
@@ -18,173 +19,123 @@ def main():
         page.wait_for_load_state("networkidle")
         time.sleep(3)
         
-        # 2週間分の日付を生成
+        # 1週間分の日付を生成
         today = datetime.now()
-        dates = [today + timedelta(days=i) for i in range(14)]
+        dates = [today + timedelta(days=i) for i in range(7)]
         
-        # 最初の日付をクリックして、プラン情報とスロットを表示させる
-        first_date = dates[0]
-        date_str = f"{first_date.year}年{first_date.month}月{first_date.day}日"
-        formatted_date = f"{first_date.month}月{first_date.day}日"
+        # すべてのプラン情報を格納する辞書（キー: プラン名）
+        all_plans_dict = {}
         
-        try:
-            # 該当する日付ボタンを探してクリック
-            date_button = page.locator(f'button[aria-label="{date_str}"]')
-            date_button.click()
-            print(f"{formatted_date}を選択しました")
-            
-            # プランが表示されるまで待機
-            time.sleep(3)
-            
-            # プラン情報を取得して表示
-            plan_elements = page.query_selector_all("li.css-1vwbwmt, li.css-1cpdoqx")
-            
-            print("\n===== プラン一覧 =====")
-            print(f"プラン数: {len(plan_elements)}")
-            
-            if len(plan_elements) == 0:
-                # プランが見つからない場合、より一般的なセレクタで試みる
-                plan_elements = page.query_selector_all("li button span.css-k6zetj")
-                print(f"代替セレクタでのプラン数: {len(plan_elements)}")
-            
-            for plan in plan_elements:
-                try:
-                    # プラン名を取得
-                    plan_name_element = plan.query_selector(".css-k6zetj")
-                    if not plan_name_element:
-                        # ボタン自体がプラン要素の場合
-                        plan_name = plan.inner_text()
-                    else:
-                        plan_name = plan_name_element.inner_text()
-                    
-                    # 価格を取得（定価を優先）
-                    price_element = plan.query_selector(".css-1y4ezd0, .css-1sq1blk, .css-d362cm")
-                    price = price_element.inner_text() if price_element else "価格不明"
-                    
-                    print(f"プラン名: {plan_name}")
-                    print(f"価格: {price}")
-                    print("-" * 30)
-                except Exception as e:
-                    print(f"プラン情報の取得中にエラーが発生しました: {e}")
-                    # HTMLの構造をデバッグ
-                    try:
-                        print(f"プラン要素HTML: {plan.inner_html()}")
-                    except:
-                        print("プラン要素のHTMLを取得できませんでした")
-        except Exception as e:
-            print(f"初回日付選択でエラーが発生しました: {e}")
+        # 結果を格納するための辞書
+        all_price_data = {}
         
-        # 全期間の予約情報を格納する辞書
-        all_reserved_times = {}
-        
-        # 各日付の予約状況を取得
-        print("\n===== 2週間分の予約状況 =====")
-        
-        for current_date in dates:
+        # 各日付ごとに処理
+        for i, current_date in enumerate(dates):
             date_str = f"{current_date.year}年{current_date.month}月{current_date.day}日"
             formatted_date = f"{current_date.month}月{current_date.day}日"
             
-            print(f"\n{formatted_date}の予約状況を確認中...")
+            print(f"\n===== {formatted_date}の料金情報 =====")
             
+            # 日付ボタンをクリック
             try:
-                # 該当する日付ボタンを探してクリック
                 date_button = page.locator(f'button[aria-label="{date_str}"]')
                 date_button.click()
-                
-                # 日付選択後の更新を待つ
                 time.sleep(2)
-                
-                # 予約状況の取得
-                time_slots = page.query_selector_all("div.css-1i0gn25")
-                
-                # 予約状況を整理
-                availability = []
-                start_time = datetime.strptime("00:00", "%H:%M")
-                
-                for i, slot in enumerate(time_slots):
-                    # 時間計算
-                    current_time = start_time + timedelta(minutes=15 * i)
-                    hour = current_time.hour
-                    minute = current_time.minute
-                    
-                    # 翌日の時間表示を調整
-                    is_next_day = hour >= 24
-                    if is_next_day:
-                        hour -= 24
-                    
-                    time_str = f"{hour:02d}:{minute:02d}"
-                    
-                    # 予約状態を確認
-                    is_disabled = slot.get_attribute("data-disabled") == "true"
-                    is_selected = slot.get_attribute("data-selected") == "true"
-                    
-                    status = "不可" if is_disabled else ("選択中" if is_selected else "可能")
-                    
-                    availability.append((time_str, status, is_next_day))
-                
-                # 連続した予約済み時間を探す
-                reserved_ranges = []
-                start_idx = None
-                
-                for i, (time_str, status, is_next_day) in enumerate(availability):
-                    if status == "不可" and (i == 0 or availability[i-1][1] != "不可"):
-                        start_idx = i
-                    elif (status != "不可" or i == len(availability) - 1) and i > 0 and start_idx is not None:
-                        if status == "不可" and i == len(availability) - 1:
-                            i += 1  # 最後のスロットが予約不可な場合
-                        
-                        # 開始時間
-                        start_time_obj = datetime.strptime(availability[start_idx][0], "%H:%M")
-                        end_time_obj = datetime.strptime(availability[i-1][0], "%H:%M") + timedelta(minutes=15)
-                        
-                        # 時間の長さを計算（分単位）
-                        duration_minutes = (i - start_idx) * 15
-                        hours = duration_minutes // 60
-                        minutes = duration_minutes % 60
-                        
-                        # 日付を設定
-                        next_date = current_date + timedelta(days=1)
-                        start_date = formatted_date if not availability[start_idx][2] else f"{next_date.month}月{next_date.day}日"
-                        end_date = formatted_date if not availability[i-1][2] else f"{next_date.month}月{next_date.day}日"
-                        
-                        # 時間帯情報を追加
-                        reserved_ranges.append({
-                            'start_date': start_date,
-                            'end_date': end_date,
-                            'start_time': start_time_obj.strftime("%H:%M"),
-                            'end_time': end_time_obj.strftime("%H:%M"),
-                            'duration_hours': hours,
-                            'duration_minutes': minutes
-                        })
-                        
-                        start_idx = None
-                
-                # 予約された時間帯を保存
-                all_reserved_times[formatted_date] = reserved_ranges
-                
             except Exception as e:
-                print(f"エラー: {formatted_date}の予約状況取得に失敗しました: {e}")
-                all_reserved_times[formatted_date] = []
+                print(f"日付選択でエラーが発生しました: {e}")
+                continue
+            
+            # この日付の料金情報を格納する辞書
+            daily_price_data = {}
+            
+            # 利用可能な時間帯を取得
+            available_hours = get_available_hours(page)
+            if not available_hours:
+                print(f"  {formatted_date}の利用可能な時間が見つかりませんでした")
+                continue
+            
+            # 初日以降は12時以降の時間帯のみ処理する
+            if i > 0:  # 初日(i=0)以外の場合
+                available_hours = [hour for hour in available_hours if hour >= 12]
+                print(f"  12時以降に絞り込み: {len(available_hours)}個")
+            else:
+                print(f"  利用可能な時間: {len(available_hours)}個")
+            
+            # 利用可能な時間ごとに1時間枠を処理
+            for start_hour in available_hours:
+                # 終了時間は開始時間+1時間
+                end_hour = (start_hour + 1) % 24  # 24時→0時、25時→1時に変換
+                
+                # 時間文字列を作成（24時以降は0時以降として表示）
+                display_start_hour = start_hour
+                if display_start_hour >= 24:
+                    display_start_hour -= 24
+                
+                display_end_hour = end_hour
+                # 日を跨ぐ場合（23時→0時など）は、表示上は24時として扱う
+                if start_hour == 23 and end_hour == 0:
+                    display_end_hour = 24
+                # 24時以降の場合も修正
+                elif display_start_hour >= 0 and display_start_hour <= 5 and end_hour == display_start_hour + 1:
+                    # 00:00-01:00, 01:00-02:00 などの通常の1時間枠
+                    display_end_hour = end_hour
+                
+                start_time = f"{display_start_hour:02d}:00"
+                end_time = f"{display_end_hour:02d}:00"
+                
+                print(f"\n時間帯: {start_time} - {end_time}")
+                # デバッグ情報を出力
+                print(f"  内部時間値: start_hour={start_hour}, end_hour={end_hour}, " +
+                      f"display_start_hour={display_start_hour}, display_end_hour={display_end_hour}")
+                
+                # 日付選択が残っているか確認し、残っていなければ再選択
+                try:
+                    date_is_selected = page.locator(f'button[aria-label="{date_str}"][aria-selected="true"]').count() > 0
+                    if not date_is_selected:
+                        print("  日付選択が解除されたため、再選択します")
+                        date_button = page.locator(f'button[aria-label="{date_str}"]')
+                        date_button.click()
+                        time.sleep(2)
+                except Exception:
+                    # エラーが発生した場合も日付を再選択
+                    print("  日付選択状態を確認できないため、再選択します")
+                    date_button = page.locator(f'button[aria-label="{date_str}"]')
+                    date_button.click()
+                    time.sleep(2)
+                
+                # 開始・終了時間を設定
+                if not set_time_range(page, start_hour, 0, start_hour + 1, 0):
+                    print(f"  時間設定に失敗しました: {start_time} - {end_time}")
+                    continue
+                
+                # 予約状況を確認
+                if is_time_slot_reserved(page, start_hour):
+                    print(f"  この時間帯は予約済みのため、スキップします: {start_time} - {end_time}")
+                    continue
+                
+                # 選択した時間枠のプラン情報を取得（その日・その時間帯で利用可能なプラン）
+                date_time_plans = get_available_plans(page, f"{formatted_date} {start_time}-{end_time}")
+                
+                # 新しいプランを全体のプラン辞書に追加
+                for plan in date_time_plans:
+                    if plan['name'] not in all_plans_dict:
+                        all_plans_dict[plan['name']] = plan
+                
+                # この時間枠のプランごとの料金を取得
+                time_slot_prices = get_prices_for_plans(page, date_time_plans)
+                
+                # 結果を保存
+                if time_slot_prices:
+                    daily_price_data[f"{start_time}-{end_time}"] = time_slot_prices
+            
+            # 日付ごとの結果を保存
+            all_price_data[formatted_date] = daily_price_data
         
-        # 全期間の予約状況を表示
-        print("\n===== 2週間分の予約済み時間帯 =====")
+        # 結果を表形式で表示
+        print_price_table(all_price_data)
         
-        has_reservations = False
-        for date, reserved_ranges in all_reserved_times.items():
-            if reserved_ranges:
-                has_reservations = True
-                print(f"\n【{date}】")
-                for time_range in reserved_ranges:
-                    duration_str = ""
-                    if time_range['duration_hours'] > 0:
-                        duration_str += f"{time_range['duration_hours']}時間"
-                    if time_range['duration_minutes'] > 0:
-                        duration_str += f"{time_range['duration_minutes']}分"
-                    
-                    print(f"・{time_range['start_date']} {time_range['start_time']}から{time_range['end_date']} {time_range['end_time']}　{duration_str}")
-        
-        if not has_reservations:
-            print("2週間分の予約はありません")
+        # 結果をCSVに保存（全プランを含める）
+        save_to_csv(all_price_data, list(all_plans_dict.keys()))
         
         # ユーザーが確認できるよう、キー入力があるまで待機
         print("\nブラウザが表示されています。終了するには何かキーを押してください...")
@@ -192,6 +143,277 @@ def main():
         
         # ブラウザを閉じる
         browser.close()
+
+def get_available_hours(page):
+    """利用可能な時間のリストを取得する"""
+    available_hours = []
+    
+    try:
+        # 開始時間のプルダウンから利用可能な時間を取得
+        start_hour_select = page.locator('select[aria-label="開始時"]')
+        start_hour_options = start_hour_select.evaluate("""(element) => {
+            return Array.from(element.options).map(option => {
+                return {
+                    value: parseInt(option.value),
+                    text: option.text,
+                    disabled: option.disabled
+                };
+            });
+        }""")
+        
+        print(f"  開始時間オプション数: {len(start_hour_options)}")
+        
+        # 各時間を処理
+        for option in start_hour_options:
+            if not option['disabled']:
+                available_hours.append(option['value'])
+        
+        # ソート（念のため）
+        available_hours.sort()
+        
+        print(f"  利用可能な時間: {len(available_hours)}個")
+        
+    except Exception as e:
+        print(f"  利用可能な時間の取得中にエラーが発生しました: {e}")
+    
+    return available_hours
+
+def is_time_slot_reserved(page, start_hour):
+    """指定された時間枠が予約済みかどうかを確認する"""
+    try:
+        time_slots = page.query_selector_all("div.css-1i0gn25")
+        
+        # 1時間の範囲をチェック（15分単位で4つ）
+        start_index = start_hour * 4  # 15分刻みなので1時間=4スロット
+        end_index = start_index + 3  # 1時間分（4つのスロット）
+        
+        # 範囲内に予約済みスロットがあるかチェック
+        for i in range(start_index, end_index + 1):
+            if i < len(time_slots):
+                is_disabled = time_slots[i].get_attribute("data-disabled") == "true"
+                if is_disabled:
+                    return True
+        
+        return False
+    except Exception as e:
+        print(f"  予約状況の確認中にエラーが発生しました: {e}")
+        return False  # エラーの場合は予約済みでないと仮定
+
+def set_time_range(page, start_hour, start_minute, end_hour, end_minute):
+    """開始・終了時間を設定する"""
+    try:
+        # 開始時間のプルダウンを選択
+        start_hour_select = page.locator('select[aria-label="開始時"]')
+        
+        # プルダウンの選択肢を確認
+        start_hour_options = start_hour_select.evaluate("""(element) => {
+            return Array.from(element.options).map(option => option.value);
+        }""")
+        
+        # 選択肢に指定した時間があるか確認
+        if str(start_hour) not in start_hour_options:
+            print(f"  開始時間 {start_hour}:00 は選択肢にありません")
+            return False
+        
+        # 開始時間を選択
+        start_hour_select.select_option(value=str(start_hour))
+        
+        # 開始分を選択
+        start_minute_select = page.locator('select[aria-label="開始分"]')
+        start_minute_select.select_option(value=f"{start_minute:02d}")
+        
+        # 終了時間のプルダウンを選択
+        end_hour_select = page.locator('select[aria-label="終了時"]')
+        
+        # プルダウンの選択肢を確認
+        end_hour_options = end_hour_select.evaluate("""(element) => {
+            return Array.from(element.options).map(option => option.value);
+        }""")
+        
+        # 選択肢に指定した時間があるか確認
+        if str(end_hour) not in end_hour_options:
+            print(f"  終了時間 {end_hour}:00 は選択肢にありません")
+            return False
+        
+        # 終了時間を選択
+        end_hour_select.select_option(value=str(end_hour))
+        
+        # 終了分を選択
+        end_minute_select = page.locator('select[aria-label="終了分"]')
+        end_minute_select.select_option(value=f"{end_minute:02d}")
+        
+        # 少し待機して料金が更新されるのを待つ
+        time.sleep(1.5)
+        return True
+    except Exception as e:
+        print(f"  時間選択でエラーが発生しました: {e}")
+        return False
+
+def get_available_plans(page, label):
+    """指定された日時で利用可能なプラン情報を取得する"""
+    plans = []
+    
+    try:
+        # プラン情報を取得（li要素を直接取得）
+        plan_elements = page.query_selector_all("ul.css-n9qrp8 > li")
+        
+        # 利用可能なプラン数をカウント
+        available_plans = 0
+        for plan in plan_elements:
+            if plan.get_attribute("class") != "css-1cpdoqx":
+                available_plans += 1
+        
+        # ログに実際の時間帯表示を含める
+        actual_time_range = page.locator('div.css-1u9gb7i').inner_text()
+        print(f"  {label}で利用可能なプラン数: {available_plans}/{len(plan_elements)}")
+        print(f"  実際の時間枠表示: {actual_time_range}")
+        
+        for i, plan in enumerate(plan_elements):
+            try:
+                # プラン名を取得
+                plan_name_element = plan.query_selector("span.css-k6zetj")
+                if plan_name_element:
+                    plan_name = plan_name_element.inner_text()
+                    
+                    # 最低利用時間を取得
+                    min_hours_element = plan.query_selector("span.css-1j0pr6n")
+                    min_hours = min_hours_element.inner_text() if min_hours_element else ""
+                    
+                    # 無効状態かどうかを確認
+                    is_disabled = plan.get_attribute("class") == "css-1cpdoqx"
+                    
+                    # 料金要素を取得（複数のクラスに対応）
+                    price_info = get_price_info(plan)
+                    
+                    plans.append({
+                        'id': i,
+                        'name': plan_name,
+                        'min_hours': min_hours,
+                        'is_disabled': is_disabled,
+                        'price_info': price_info
+                    })
+            except Exception as e:
+                print(f"  プラン情報の取得中にエラーが発生しました: {e}")
+                
+    except Exception as e:
+        print(f"  プラン情報取得でエラーが発生しました: {e}")
+    
+    return plans
+
+def get_price_info(plan_element):
+    """プラン要素から料金情報を取得する"""
+    price_info = {
+        'type': None,
+        'text': "価格不明",
+        'value': None
+    }
+    
+    try:
+        # まず通常料金（セール前）を探す
+        price_element = plan_element.query_selector("span.css-1sq1blk")
+        if price_element:
+            price_info['type'] = "通常価格"
+            price_info['text'] = price_element.inner_text()
+            
+            # 割引後価格があるか探す（セール表示の場合）
+            discount_element = plan_element.query_selector("span.css-d362cm")
+            if discount_element:
+                price_info['discount_text'] = discount_element.inner_text()
+                
+                # 割引率を取得
+                discount_rate_element = plan_element.query_selector("span.css-hdwjef")
+                if discount_rate_element:
+                    price_info['discount_rate'] = discount_rate_element.inner_text()
+        
+        # 通常料金が見つからなければ割引後価格を探す
+        elif not price_element:
+            price_element = plan_element.query_selector("span.css-d362cm")
+            if price_element:
+                price_info['type'] = "割引後価格"
+                price_info['text'] = price_element.inner_text()
+        
+        # さらに見つからなければ通常の料金表示を探す
+        if not price_element:
+            price_element = plan_element.query_selector("span.css-1y4ezd0")
+            if price_element:
+                price_info['type'] = "表示価格"
+                price_info['text'] = price_element.inner_text()
+        
+        # 価格が見つかった場合、数値を抽出
+        if price_info['type']:
+            price_info['value'] = int(''.join(filter(str.isdigit, price_info['text'])))
+    except Exception as e:
+        print(f"  料金情報の取得中にエラーが発生しました: {e}")
+    
+    return price_info
+
+def get_prices_for_plans(page, plans):
+    """各プランの料金を取得する"""
+    # 各プランの料金を取得
+    plan_prices = {}
+    
+    for plan in plans:
+        if plan['price_info']['value']:
+            plan_prices[plan['name']] = plan['price_info']['value']
+            
+            status = " (無効状態)" if plan['is_disabled'] else ""
+            price_type = plan['price_info']['type'] or "表示価格"
+            price_text = plan['price_info']['text']
+            
+            print(f"  プラン: {plan['name']} - {price_type}: {price_text}{status}")
+    
+    return plan_prices
+
+def print_price_table(all_price_data):
+    """料金データを表形式で表示"""
+    print("\n===== 1週間分の料金情報 =====")
+    
+    for date, time_slots in all_price_data.items():
+        print(f"\n【{date}】")
+        
+        if not time_slots:
+            print("  料金情報はありません")
+            continue
+        
+        # 各時間帯の料金を表示
+        for time_slot, prices in time_slots.items():
+            if prices:
+                print(f"  時間帯: {time_slot}")
+                for plan_name, price in prices.items():
+                    print(f"    {plan_name}: ¥{price:,}")
+
+def save_to_csv(all_price_data, all_plan_names):
+    """料金データをCSVに保存"""
+    # データフレーム用のリストを作成
+    data_rows = []
+    
+    # データを整形
+    for date, time_slots in all_price_data.items():
+        for time_slot, prices in time_slots.items():
+            if prices:
+                row = {'日付': date, '時間帯': time_slot}
+                
+                # 各プランの料金を追加
+                for plan_name in all_plan_names:
+                    row[plan_name] = prices.get(plan_name, None)
+                
+                data_rows.append(row)
+    
+    # データフレームを作成
+    if data_rows:
+        df = pd.DataFrame(data_rows)
+        
+        # 単位を追加（各プラン列に「円」を追加）
+        for plan_name in all_plan_names:
+            if plan_name in df.columns:
+                df[plan_name] = df[plan_name].apply(lambda x: f"{int(x):,}円" if pd.notnull(x) else "")
+        
+        # CSVに保存
+        filename = f"spacemarket_prices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
+        print(f"\nCSVファイルに保存しました: {filename}")
+    else:
+        print("\nデータがないため、CSVは作成されませんでした")
 
 if __name__ == "__main__":
     main()
