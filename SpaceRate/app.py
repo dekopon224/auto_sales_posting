@@ -102,11 +102,26 @@ def scrape_hourly_prices(url, days=7):
             hours.sort()
 
             for hour in hours:
+                # 24時以上は翌日の時間として処理
+                target_date = current_date
+                target_hour = hour
+                
+                if hour >= 24:
+                    # 24時以上の場合は翌日の相当する時間に変換
+                    target_date = current_date + timedelta(days=1)
+                    target_hour = hour - 24
+                    # 翌日の曜日種別を再計算
+                    dow = target_date.weekday()
+                    day_type = 'weekday' if dow < 5 else 'weekend'
+                
+                # 日付をISO形式で生成
+                target_iso_date = target_date.strftime('%Y-%m-%d')
+                
                 # 1時間後
-                start = hour
-                end = hour + 1
-                # 時刻レンジ設定
-                if not set_time_range(page, start, 0, end, 0):
+                start = target_hour
+                end = target_hour + 1
+                # 時刻レンジ設定（元のhourを使用）
+                if not set_time_range(page, hour, 0, hour + 1, 0):
                     continue
                 # プラン取得
                 plans = get_available_plans(page)
@@ -117,7 +132,7 @@ def scrape_hourly_prices(url, days=7):
                     # planId 固定生成
                     pid = 'plan_' + hashlib.md5(name.encode()).hexdigest()[:8]
                     # rate_key
-                    dt_start = f"{iso_date}T{start:02d}:00"
+                    dt_start = f"{target_iso_date}T{start:02d}:00"
                     rate_key = f"{dt_start}#{pid}"
 
                     item = {
