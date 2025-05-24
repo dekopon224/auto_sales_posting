@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 import re
 from datetime import datetime, timedelta, timezone
 import time
-from urllib.parse import urlparse, parse_qs
 import json
 from playwright.sync_api import sync_playwright
 
@@ -36,11 +35,8 @@ def process_single_url(url, now):
             'User-Agent': 'Mozilla/5.0'
         }
 
-        # DynamoDB テーブル名
-        table_name = 'SpaceInfo'
-        table = boto3.resource('dynamodb').Table(table_name)
+        table = boto3.resource('dynamodb').Table('SpaceInfo')
 
-        # まずBeautifulSoupで基本情報を取得
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -105,7 +101,7 @@ def process_single_url(url, now):
                 'stay_capacity': seated_match.group(0) if seated_match else 'N/A',
                 'floor_space': area_match.group(0) + '㎡' if area_match else 'N/A',
                 'space_type': info_dict.get('会場タイプ', 'N/A'),
-                'point': point,  # 算出したポイント
+                'point': point,
                 'createdAt': created_at,
                 'expireAt': expire_at
             }
@@ -121,77 +117,44 @@ def process_single_url(url, now):
     return result
 
 def lambda_handler(event, context):
-    # API Gatewayからのリクエストの場合、bodyをパースする必要がある
-    if 'body' in event:
-        try:
-            body = json.loads(event['body'])
-        except:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'Invalid request body'
-                })
-            }
-    else:
-        # テスト時などの直接呼び出し
-        body = event
-    
-    # 単一URL形式と複数URL形式の両方をサポート
-    urls = []
-    if "url" in body:
-        # 単一URL形式 {"url": "..."}
-        urls = [body["url"]]
-    elif "urls" in body:
-        # 複数URL形式 {"urls": ["...", "...", "..."]}
-        urls = body["urls"]
-    else:
-        return {
-            'statusCode': 400,
-            'body': json.dumps({
-                'error': 'url または urls が不足しています'
-            })
-        }
-
-    if not urls:
-        return {
-            'statusCode': 400,
-            'body': json.dumps({
-                'error': '処理するURLがありません'
-            })
-        }
-
-    # JSTで現在時刻を取得
+    # SQSからメッセージを受信
     JST = timezone(timedelta(hours=9))
     now = datetime.now(JST)
-
+    
     results = []
     
-    # 各URLを処理
-    for url in urls:
-        print(f"処理開始: {url}")
-        result = process_single_url(url, now)
-        results.append(result)
-    
-    # 結果集計
-    total_success = sum(1 for r in results if r["success"])
-    total_errors = sum(1 for r in results if not r["success"])
-    
-    # 成功したスペース名のリスト
-    successful_spaces = [r["space_name"] for r in results if r["success"] and r["space_name"]]
-    
-    # レスポンスもJSON文字列として返す
-    response_body = {
-        "summary": f"処理完了: {total_success}件成功, {total_errors}件エラー",
-        "total_urls": len(urls),
-        "successful_urls": total_success,
-        "failed_urls": total_errors,
-        "successful_spaces": successful_spaces,
-        "details": results
-    }
+    for record in event['Records']:
+        try:
+            # SQSメッセージからデータを取得
+            message_body = json.loads(record['body'])
+            urls = message_body.get('urls', [])
+            
+            print(f"処理開始: {len(urls)}件のURL")
+            
+            # 各URLを処理
+            for url in urls:
+                print(f"処理中: {url}")
+                result = process_single_url(url, now)
+                results.append(result)
+            
+            # 結果をログに出力
+            total_success = sum(1 for r in results if r["success"])
+            total_errors = sum(1 for r in results if not r["success"])
+            successful_spaces = [r["space_name"] for r in results if r["success"] and r["space_name"]]
+            
+            print(f"処理完了: {total_success}件成功, {total_errors}件エラー")
+            print(f"成功したスペース: {', '.join(successful_spaces)}")
+            
+        except Exception as e:
+            print(f"メッセージ処理エラー: {e}")
     
     return {
         'statusCode': 200,
-        'body': json.dumps(response_body, ensure_ascii=False)
+        'body': json.dumps({
+            'processed_messages': len(event['Records']),
+            'processed_urls': len(results),
+            'successful_urls': sum(1 for r in results if r["success"])
+        })
     }
 
 def get_points_data(url):
