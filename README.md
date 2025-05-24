@@ -1,5 +1,12 @@
 # auto_sales_posting
 
+# 設定トリガー
+postUrls_optioninfo　毎週月曜日午後11時〜0時
+postUrls_spaceinfo　　毎日0時〜1時
+
+fetchSpaceOptionsAndUpdateSheet　毎週火曜日0時〜1時
+fetchSpaceInfoAndUpdateSheet　　毎日1時〜2時
+
 # ビルド手順 spaceinfo
 
 docker build --no-cache --platform=linux/amd64 -t spaceinfo .
