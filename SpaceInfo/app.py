@@ -8,45 +8,38 @@ from urllib.parse import urlparse, parse_qs
 import json
 from playwright.sync_api import sync_playwright
 
-def lambda_handler(event, context):
-    # APIリクエストからURLを取得
-    if 'body' in event:
-        try:
-            body = json.loads(event['body'])
-            url = body.get('url')
-        except:
-            return {
-                'statusCode': 400,
-                'body': json.dumps({
-                    'error': 'Invalid request body'
-                })
-            }
-    else:
-        # テスト時などの直接呼び出し
-        url = event.get('url')
+def extract_room_id_from_soup(soup):
+    try:
+        script_tag = soup.find("script", id="__NEXT_DATA__")
+        if not script_tag:
+            return None
+        
+        json_data = json.loads(script_tag.string)
+        room_id = json_data.get("props", {}).get("pageProps", {}).get("data", {}).get("room", {}).get("id")
+        return room_id
+    except (json.JSONDecodeError, AttributeError, KeyError) as e:
+        print(f"room_id取得エラー: {e}")
+        return None
+
+def process_single_url(url, now):
+    """単一URLの処理"""
+    result = {
+        "url": url,
+        "success": False,
+        "space_id": None,
+        "space_name": None,
+        "error": None
+    }
     
-    # URLが指定されていない場合はエラー
-    if not url:
-        return {
-            'statusCode': 400,
-            'body': json.dumps({
-                'error': 'URL parameter is required'
-            })
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0'
         }
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0'
-    }
+        # DynamoDB テーブル名
+        table_name = 'SpaceInfo'
+        table = boto3.resource('dynamodb').Table(table_name)
 
-    # DynamoDB テーブル名
-    table_name = 'SpaceInfo'
-    table = boto3.resource('dynamodb').Table(table_name)
-
-    # JSTで現在時刻を取得
-    JST = timezone(timedelta(hours=9))
-    now = datetime.now(JST)
-
-    try:
         # まずBeautifulSoupで基本情報を取得
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -55,6 +48,7 @@ def lambda_handler(event, context):
         # スペース名
         space_name = soup.find('h1', class_='css-cftpp3') or soup.find('h1')
         space_name_text = space_name.text.strip() if space_name else "名称未取得"
+        result["space_name"] = space_name_text
 
         # テーブルデータ抽出
         info_dict = {}
@@ -76,9 +70,12 @@ def lambda_handler(event, context):
         capacity_match = re.search(r'(\d+)人収容', capacity_text)
         seated_match = re.search(r'(\d+)人着席可能', capacity_text)
         area_match = re.search(r'(\d+)', capacity_text)
-        parsed_url = urlparse(url)
-        query_params = parse_qs(parsed_url.query)
-        space_id = query_params.get('room_uid', ['unknown'])[0]
+        
+        # HTMLスクリプトタグからroom_idを取得
+        space_id = extract_room_id_from_soup(soup)
+        if not space_id:
+            space_id = 'unknown'
+        result["space_id"] = space_id
 
         # Playwrightを使用してポイント情報を取得
         points_data = get_points_data(url)
@@ -108,7 +105,6 @@ def lambda_handler(event, context):
                 'stay_capacity': seated_match.group(0) if seated_match else 'N/A',
                 'floor_space': area_match.group(0) + '㎡' if area_match else 'N/A',
                 'space_type': info_dict.get('会場タイプ', 'N/A'),
-                'excludedMorning': False,
                 'point': point,  # 算出したポイント
                 'createdAt': created_at,
                 'expireAt': expire_at
@@ -116,20 +112,87 @@ def lambda_handler(event, context):
 
             table.put_item(Item=item)
 
+        result["success"] = True
+        
+    except Exception as e:
+        print(f"URL処理エラー ({url}): {e}")
+        result["error"] = f"URL処理エラー: {str(e)}"
+    
+    return result
+
+def lambda_handler(event, context):
+    # API Gatewayからのリクエストの場合、bodyをパースする必要がある
+    if 'body' in event:
+        try:
+            body = json.loads(event['body'])
+        except:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({
+                    'error': 'Invalid request body'
+                })
+            }
+    else:
+        # テスト時などの直接呼び出し
+        body = event
+    
+    # 単一URL形式と複数URL形式の両方をサポート
+    urls = []
+    if "url" in body:
+        # 単一URL形式 {"url": "..."}
+        urls = [body["url"]]
+    elif "urls" in body:
+        # 複数URL形式 {"urls": ["...", "...", "..."]}
+        urls = body["urls"]
+    else:
         return {
-            'statusCode': 200,
+            'statusCode': 400,
             'body': json.dumps({
-                'message': f"{space_name_text} のデータを {now.strftime('%Y-%m-%d')} から1週間分登録しました。"
+                'error': 'url または urls が不足しています'
             })
         }
 
-    except Exception as e:
+    if not urls:
         return {
-            'statusCode': 500,
+            'statusCode': 400,
             'body': json.dumps({
-                'error': f"エラーが発生しました: {str(e)}"
+                'error': '処理するURLがありません'
             })
         }
+
+    # JSTで現在時刻を取得
+    JST = timezone(timedelta(hours=9))
+    now = datetime.now(JST)
+
+    results = []
+    
+    # 各URLを処理
+    for url in urls:
+        print(f"処理開始: {url}")
+        result = process_single_url(url, now)
+        results.append(result)
+    
+    # 結果集計
+    total_success = sum(1 for r in results if r["success"])
+    total_errors = sum(1 for r in results if not r["success"])
+    
+    # 成功したスペース名のリスト
+    successful_spaces = [r["space_name"] for r in results if r["success"] and r["space_name"]]
+    
+    # レスポンスもJSON文字列として返す
+    response_body = {
+        "summary": f"処理完了: {total_success}件成功, {total_errors}件エラー",
+        "total_urls": len(urls),
+        "successful_urls": total_success,
+        "failed_urls": total_errors,
+        "successful_spaces": successful_spaces,
+        "details": results
+    }
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps(response_body, ensure_ascii=False)
+    }
 
 def get_points_data(url):
     """Playwrightを使用してポイント情報を取得する関数"""
