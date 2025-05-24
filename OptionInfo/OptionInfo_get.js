@@ -16,7 +16,7 @@ function fetchSpaceOptionsAndUpdateSheet() {
     
     console.log(`取得したspaceIds: ${spaceIds.join(', ')}`);
     
-    // 2. APIにリクエストを送信
+    // 2. APIにリクエストを送信（履歴も取得）
     const responseData = fetchOptionsFromAPI(API_URL, spaceIds);
     
     if (!responseData || !responseData.spaces) {
@@ -24,7 +24,7 @@ function fetchSpaceOptionsAndUpdateSheet() {
       return;
     }
     
-    // 3. スプレッドシートに書き込み
+    // 3. スプレッドシートに書き込み（履歴付き）
     writeDataToSheet(sheet, responseData.spaces, spaceIds);
     
   } catch (error) {
@@ -65,7 +65,8 @@ function getSpaceIds(sheet) {
  */
 function fetchOptionsFromAPI(apiUrl, spaceIds) {
   const payload = {
-    spaceIds: spaceIds
+    spaceIds: spaceIds,
+    historyLimit: 5  // 履歴を5件まで取得
   };
   
   const options = {
@@ -122,24 +123,23 @@ function writeDataToSheet(sheet, spaces, originalSpaceIds) {
     // B列にスペース名を書き込む
     sheet.getRange(row, 2).setValue(space.name || '');
     
-    // オプション情報を書き込む
-    writeOptionsInRow(sheet, row, space.options || []);
+    // オプション情報を書き込む（履歴付き）
+    writeOptionsWithHistoryInRow(sheet, row, space.options || [], space.priceHistory || []);
   });
 }
 
 /**
- * 指定行のオプション列をクリア
+ * 指定行のオプション列をクリア（履歴対応）
  * @param {Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
  */
 function clearOptionsInRow(sheet, row) {
-  // R列から始まるオプション列をクリア（最大50オプション分を想定）
+  // R列から始まるオプション列をクリア（履歴を含めて大幅に拡張）
   const startCol = 18; // R列 = 18
-  const maxOptions = 50;
-  const endCol = startCol + (maxOptions * 2) - 1;
+  const maxCols = 200; // 履歴を含めて最大200列まで想定
   
   // 現在の値を取得
-  const range = sheet.getRange(row, startCol, 1, endCol - startCol + 1);
+  const range = sheet.getRange(row, startCol, 1, maxCols);
   const values = range.getValues()[0];
   
   // 空でない最後のセルを見つける
@@ -158,12 +158,13 @@ function clearOptionsInRow(sheet, row) {
 }
 
 /**
- * 指定行にオプション情報を書き込む
+ * 指定行にオプション情報と履歴を書き込む
  * @param {Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
  * @param {Array} options - オプション配列
+ * @param {Array} priceHistory - 価格履歴配列
  */
-function writeOptionsInRow(sheet, row, options) {
+function writeOptionsWithHistoryInRow(sheet, row, options, priceHistory) {
   // まず既存のオプション列をクリア
   clearOptionsInRow(sheet, row);
   
@@ -171,19 +172,72 @@ function writeOptionsInRow(sheet, row, options) {
     return;
   }
   
-  // オプションデータを2次元配列に変換
-  const optionValues = [];
-  options.forEach((option, index) => {
-    // R列、T列、V列... と2列ごとにオプション名
-    // S列、U列、W列... と2列ごとに価格
-    optionValues.push(option.name || '');
-    optionValues.push(option.price || '');
+  // 履歴をオプション名ごとにグループ化
+  const historyByOption = {};
+  priceHistory.forEach(history => {
+    const optionName = history.optionName;
+    if (!historyByOption[optionName]) {
+      historyByOption[optionName] = [];
+    }
+    historyByOption[optionName].push(history);
   });
   
-  // R列から書き込み開始
-  const startCol = 18; // R列 = 18
-  const range = sheet.getRange(row, startCol, 1, optionValues.length);
+  // 書き込み用データを準備
+  const rowData = [];
   
-  // 2次元配列として設定
-  range.setValues([optionValues]);
+  options.forEach((option, index) => {
+    // オプション名と価格を追加
+    rowData.push(option.name || '');
+    rowData.push(option.price || '');
+    
+    // 該当するオプションの履歴があるかチェック
+    const optionHistories = historyByOption[option.name] || [];
+    
+    if (optionHistories.length > 0) {
+      // 「履歴」文字列を追加
+      rowData.push('履歴');
+      
+      // 履歴内容を追加
+      optionHistories.forEach(history => {
+        const historyText = formatHistoryText(history);
+        rowData.push(historyText);
+      });
+    }
+  });
+  
+  if (rowData.length > 0) {
+    // R列から書き込み開始
+    const startCol = 18; // R列 = 18
+    const range = sheet.getRange(row, startCol, 1, rowData.length);
+    
+    // 2次元配列として設定
+    range.setValues([rowData]);
+  }
+}
+
+/**
+ * 履歴テキストをフォーマットする
+ * @param {Object} history - 履歴オブジェクト
+ * @returns {string} フォーマットされた履歴テキスト
+ */
+function formatHistoryText(history) {
+  // 日時をフォーマット
+  const timestamp = history.timestamp;
+  let formattedDate = '';
+  
+  try {
+    // ISO形式の日時を Date オブジェクトに変換
+    const date = new Date(timestamp);
+    if (!isNaN(date.getTime())) {
+      // 日本時間での表示
+      formattedDate = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+    } else {
+      formattedDate = timestamp; // 変換できない場合はそのまま
+    }
+  } catch (e) {
+    formattedDate = timestamp; // エラーの場合はそのまま
+  }
+  
+  // フォーマット: 「オプション名：変更前価格から変更後価格に変更（取得日時）」
+  return `${history.optionName}：${history.oldPrice}から${history.newPrice}に変更（${formattedDate}）`;
 }
