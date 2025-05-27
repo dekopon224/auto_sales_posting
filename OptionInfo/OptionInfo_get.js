@@ -1,6 +1,18 @@
 function fetchSpaceOptionsAndUpdateSheet() {
-  // スプレッドシートの取得
-  const sheet = SpreadsheetApp.getActiveSheet();
+  // 実行環境を判定
+  const isTimeTrigger = !SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  
+  // シート名を明示的に指定
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('施設情報');
+  
+  // シートが存在しない場合のエラーハンドリング
+  if (!sheet) {
+    console.error('「施設情報」シートが見つかりません');
+    if (!isTimeTrigger) {
+      SpreadsheetApp.getUi().alert('「施設情報」シートが見つかりません');
+    }
+    return;
+  }
   
   // APIのURL（実際のAPI Gateway URLに変更してください）
   const API_URL = 'https://a776jppz94.execute-api.ap-northeast-1.amazonaws.com/prod/getoptionInfo';
@@ -11,6 +23,9 @@ function fetchSpaceOptionsAndUpdateSheet() {
     
     if (spaceIds.length === 0) {
       SpreadsheetApp.getUi().alert('spaceIdが見つかりませんでした。');
+      if (!isTimeTrigger) {
+        SpreadsheetApp.getUi().alert('spaceIdが見つかりませんでした。');
+      }
       return;
     }
     
@@ -20,16 +35,24 @@ function fetchSpaceOptionsAndUpdateSheet() {
     const responseData = fetchOptionsFromAPI(API_URL, spaceIds);
     
     if (!responseData || !responseData.spaces) {
-      SpreadsheetApp.getUi().alert('APIからデータを取得できませんでした。');
+      console.error('APIからデータを取得できませんでした。');
+      if (!isTimeTrigger) {
+        SpreadsheetApp.getUi().alert('APIからデータを取得できませんでした。');
+      }
       return;
     }
     
     // 3. スプレッドシートに書き込み（履歴付き）
     writeDataToSheet(sheet, responseData.spaces, spaceIds);
     
+    // 成功ログ
+    console.log('データの更新が完了しました。');
+    
   } catch (error) {
     console.error('エラーが発生しました:', error);
-    SpreadsheetApp.getUi().alert(`エラーが発生しました: ${error.toString()}`);
+    if (!isTimeTrigger) {
+      SpreadsheetApp.getUi().alert(`エラーが発生しました: ${error.toString()}`);
+    }
   }
 }
 

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import time
 import json
 from playwright.sync_api import sync_playwright
+from boto3.dynamodb.conditions import Key
 
 def extract_room_id_from_soup(soup):
     try:
@@ -65,13 +66,58 @@ def process_single_url(url, now):
         capacity_text = info_dict.get('定員人数', '')
         capacity_match = re.search(r'(\d+)人収容', capacity_text)
         seated_match = re.search(r'(\d+)人着席可能', capacity_text)
-        area_match = re.search(r'(\d+)', capacity_text)
+        area_match = re.search(r'(\d+(?:\.\d+)?)㎡', capacity_text)
         
         # HTMLスクリプトタグからroom_idを取得
         space_id = extract_room_id_from_soup(soup)
         if not space_id:
             space_id = 'unknown'
         result["space_id"] = space_id
+
+        # ===== 追加：古いデータを削除 =====
+        # 今日の日付を取得
+        today_str = now.strftime('%Y-%m-%d')
+        
+        # このspaceIdの全データを取得して、前日以前のものを削除
+        try:
+            # spaceIdでクエリ
+            response = table.query(
+                KeyConditionExpression=Key('spaceId').eq(space_id)
+            )
+            
+            # 前日以前のデータを削除
+            with table.batch_writer() as batch:
+                for item in response.get('Items', []):
+                    if item['date'] < today_str:
+                        batch.delete_item(
+                            Key={
+                                'spaceId': item['spaceId'],
+                                'date': item['date']
+                            }
+                        )
+                        print(f"削除: spaceId={item['spaceId']}, date={item['date']}")
+            
+            # ページネーション対応
+            while 'LastEvaluatedKey' in response:
+                response = table.query(
+                    KeyConditionExpression=Key('spaceId').eq(space_id),
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                
+                with table.batch_writer() as batch:
+                    for item in response.get('Items', []):
+                        if item['date'] < today_str:
+                            batch.delete_item(
+                                Key={
+                                    'spaceId': item['spaceId'],
+                                    'date': item['date']
+                                }
+                            )
+                            print(f"削除: spaceId={item['spaceId']}, date={item['date']}")
+                            
+        except Exception as e:
+            print(f"古いデータの削除中にエラー: {e}")
+        # ===== 追加ここまで =====
 
         # Playwrightを使用してポイント情報を取得
         points_data = get_points_data(url)
@@ -99,7 +145,7 @@ def process_single_url(url, now):
                 'station': info_dict.get('最寄駅', 'N/A'),
                 'capacity': capacity_match.group(0) if capacity_match else 'N/A',
                 'stay_capacity': seated_match.group(0) if seated_match else 'N/A',
-                'floor_space': area_match.group(0) + '㎡' if area_match else 'N/A',
+                'floor_space': area_match.group(0) if area_match else 'N/A',
                 'space_type': info_dict.get('会場タイプ', 'N/A'),
                 'point': point,
                 'createdAt': created_at,

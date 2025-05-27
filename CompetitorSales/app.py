@@ -223,8 +223,36 @@ def get_reservation_data(url):
                 formatted_date = f"{current_date.month}月{current_date.day}日"
                 
                 try:
-                    # 該当する日付ボタンを探してクリック
+                    # 該当する日付ボタンを探す
                     date_button = page.locator(f'button[aria-label="{date_str}"]')
+                    
+                    # 日付ボタンが見つからない場合は次の月に移動
+                    if date_button.count() == 0:
+                        print(f"{formatted_date}のボタンが見つかりません。次の月に移動します...")
+                        try:
+                            next_month_button = page.locator('button[aria-label="次の月"]')
+                            if next_month_button.count() > 0:
+                                next_month_button.click()
+                                time.sleep(2)  # 月の切り替えを待機
+                                
+                                # 日付ボタンを再度探す
+                                date_button = page.locator(f'button[aria-label="{date_str}"]')
+                                
+                                # それでも見つからない場合はスキップ
+                                if date_button.count() == 0:
+                                    print(f"{formatted_date}のボタンが見つかりませんでした。スキップします。")
+                                    all_reserved_times[formatted_date] = []
+                                    continue
+                            else:
+                                print(f"次の月ボタンが見つかりません。{formatted_date}をスキップします。")
+                                all_reserved_times[formatted_date] = []
+                                continue
+                        except Exception as e:
+                            print(f"月の移動中にエラーが発生しました: {e}")
+                            all_reserved_times[formatted_date] = []
+                            continue
+                    
+                    # 日付ボタンをクリック
                     date_button.click()
                     
                     # 日付選択後の更新を待つ

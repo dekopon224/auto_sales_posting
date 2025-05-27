@@ -1,7 +1,7 @@
 import boto3
 import json
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 def decimal_to_float(obj):
     """DynamoDBのDecimal型をfloatに変換"""
@@ -30,9 +30,12 @@ def lambda_handler(event, context):
 
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table('SpaceInfo')
+
+    # JSTを定義
+    JST = timezone(timedelta(hours=9))
     
     # 1週間分の日付を生成（今日から）
-    today = datetime.now()
+    today = datetime.now(JST)
     dates = [(today + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
     
     rooms_data = []

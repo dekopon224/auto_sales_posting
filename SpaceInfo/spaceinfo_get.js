@@ -1,8 +1,20 @@
 function fetchSpaceInfoAndUpdateSheet() {
-  // スプレッドシートの取得
-  const sheet = SpreadsheetApp.getActiveSheet();
+  // 実行環境を判定
+  const isTimeTrigger = !SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   
-  // APIのURL（実際のAPI Gateway URLに変更してください）
+  // シート名を明示的に指定
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('施設情報');
+  
+  // シートが存在しない場合のエラーハンドリング
+  if (!sheet) {
+    console.error('「施設情報」シートが見つかりません');
+    if (!isTimeTrigger) {
+      SpreadsheetApp.getUi().alert('「施設情報」シートが見つかりません');
+    }
+    return;
+  }
+  
+  // APIのURL
   const API_URL = 'https://a776jppz94.execute-api.ap-northeast-1.amazonaws.com/prod/getspaceinfo';
   
   try {
@@ -10,7 +22,10 @@ function fetchSpaceInfoAndUpdateSheet() {
     const roomIds = getRoomIds(sheet);
     
     if (roomIds.length === 0) {
-      SpreadsheetApp.getUi().alert('room_idが見つかりませんでした。');
+      console.error('room_idが見つかりませんでした。');
+      if (!isTimeTrigger) {
+        SpreadsheetApp.getUi().alert('room_idが見つかりませんでした。');
+      }
       return;
     }
     
@@ -20,16 +35,24 @@ function fetchSpaceInfoAndUpdateSheet() {
     const responseData = fetchRoomInfoFromAPI(API_URL, roomIds);
     
     if (!responseData || !responseData.rooms) {
-      SpreadsheetApp.getUi().alert('APIからデータを取得できませんでした。');
+      console.error('APIからデータを取得できませんでした。');
+      if (!isTimeTrigger) {
+        SpreadsheetApp.getUi().alert('APIからデータを取得できませんでした。');
+      }
       return;
     }
     
     // 3. スプレッドシートに書き込み
     writeRoomDataToSheet(sheet, responseData.rooms, roomIds);
     
+    // 成功ログ
+    console.log('データの更新が完了しました。');
+    
   } catch (error) {
     console.error('エラーが発生しました:', error);
-    SpreadsheetApp.getUi().alert(`エラーが発生しました: ${error.toString()}`);
+    if (!isTimeTrigger) {
+      SpreadsheetApp.getUi().alert(`エラーが発生しました: ${error.toString()}`);
+    }
   }
 }
 
