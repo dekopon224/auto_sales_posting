@@ -47,6 +47,7 @@ def list_plan_ids(table, space_id):
 def get_sales_data(table, space_id, plan_id, start_date, end_date):
     """
     特定の spaceId と planId の売上データを取得し、日ごとに集計する
+    同じ予約スロットが複数ある場合は、processed_at が最新のものを使用
     """
     try:
         # DynamoDBからデータを取得
@@ -69,7 +70,29 @@ def get_sales_data(table, space_id, plan_id, start_date, end_date):
             )
             items.extend(response.get('Items', []))
 
-        # 日ごとに集計
+        # 各予約スロットの最新データを保持する辞書
+        latest_reservations = {}
+        
+        for item in items:
+            reservation_date = item.get('reservationDate', '')
+            start_time = item.get('start_time', '')
+            processed_at = item.get('processed_at', '')
+            
+            if not reservation_date or not start_time:
+                continue
+                
+            # ユニークキー（日付+開始時間）
+            reservation_key = f"{reservation_date}#{start_time}"
+            
+            # 既存のエントリがない、またはより新しいデータの場合は更新
+            if reservation_key not in latest_reservations:
+                latest_reservations[reservation_key] = item
+            else:
+                existing_processed_at = latest_reservations[reservation_key].get('processed_at', '')
+                if processed_at > existing_processed_at:
+                    latest_reservations[reservation_key] = item
+
+        # 日ごとに集計（最新データのみを使用）
         daily_sales = defaultdict(lambda: {
             'date': '',
             'total_sales': 0,
@@ -77,10 +100,8 @@ def get_sales_data(table, space_id, plan_id, start_date, end_date):
             'reservations': []
         })
 
-        for item in items:
+        for item in latest_reservations.values():
             reservation_date = item.get('reservationDate', '')
-            if not reservation_date:
-                continue
             try:
                 res_date = datetime.strptime(reservation_date, '%Y-%m-%d').date()
             except:
@@ -96,7 +117,8 @@ def get_sales_data(table, space_id, plan_id, start_date, end_date):
                 'start_time': item.get('start_time', ''),
                 'end_time': item.get('end_time', ''),
                 'price': int(item.get('price', 0)),
-                'planDisplayName': item.get('planDisplayName', '')
+                'planDisplayName': item.get('planDisplayName', ''),
+                'processed_at': item.get('processed_at', '')  # デバッグ用
             })
 
         sorted_sales = sorted(daily_sales.values(), key=lambda x: x['date'])

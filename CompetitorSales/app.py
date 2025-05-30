@@ -10,19 +10,40 @@ from playwright.sync_api import sync_playwright
 TABLE_NAME = 'CompetitorSales'
 
 def lambda_handler(event, context):
-    # リクエストボディから URLs パラメータ取得
-    if 'body' in event:
-        body = json.loads(event['body'] or '{}')
-        urls = body.get('urls')
+    # SQSメッセージから URLs パラメータ取得
+    all_urls = []
+    timestamps = []
+    
+    if 'Records' in event:
+        # SQSイベントの場合
+        for record in event['Records']:
+            try:
+                message_body = json.loads(record['body'])
+                urls = message_body.get('urls', [])
+                timestamp = message_body.get('timestamp', '')
+                if urls and isinstance(urls, list):
+                    all_urls.extend(urls)
+                    timestamps.append(timestamp)
+            except Exception as e:
+                print(f"SQSメッセージ解析エラー: {e}")
+                continue
     else:
-        urls = event.get('urls')
-    if not urls or not isinstance(urls, list):
+        # 既存のHTTPリクエスト処理（互換性維持）
+        if 'body' in event:
+            body = json.loads(event['body'] or '{}')
+            urls = body.get('urls')
+        else:
+            urls = event.get('urls')
+        if urls and isinstance(urls, list):
+            all_urls = urls
+    
+    if not all_urls:
         return { 'statusCode': 400, 'body': json.dumps({'error': 'urls (リスト) が必要です'}) }
 
     results = []
     errors = []  # エラー情報を記録
     
-    for url in urls:
+    for url in all_urls:
         # スクレイピング
         reservation_data = get_reservation_data(url)
         if 'error' in reservation_data:
