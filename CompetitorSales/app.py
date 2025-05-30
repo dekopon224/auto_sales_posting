@@ -20,30 +20,50 @@ def lambda_handler(event, context):
         return { 'statusCode': 400, 'body': json.dumps({'error': 'urls (リスト) が必要です'}) }
 
     results = []
+    errors = []  # エラー情報を記録
+    
     for url in urls:
         # スクレイピング
         reservation_data = get_reservation_data(url)
         if 'error' in reservation_data:
-            return { 
-                'statusCode': 500, 
-                'body': json.dumps(reservation_data, ensure_ascii=False) 
-            }
-
+            # エラーでも処理を続行
+            errors.append({
+                'url': url,
+                'error': reservation_data['error']
+            })
+            continue  # 次のURLへ
+        
         # DynamoDB へ保存
         try:
             write_to_dynamodb(url, reservation_data)
+            results.append(reservation_data)
         except Exception as e:
-            return {
-                'statusCode': 500,
-                'body': json.dumps({'error': f"DynamoDB書き込み失敗: {e}"}, ensure_ascii=False)
-            }
-
-        results.append(reservation_data)
-
-    return {
-        'statusCode': 200,
-        'body': json.dumps({'message': '保存完了', 'records': results}, ensure_ascii=False)
-    }
+            errors.append({
+                'url': url,
+                'error': f"DynamoDB書き込み失敗: {e}"
+            })
+    
+    # 部分的成功でも200を返す
+    if results:
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': f'{len(results)}件保存完了',
+                'successful': len(results),
+                'failed': len(errors),
+                'records': results,
+                'errors': errors
+            }, ensure_ascii=False)
+        }
+    else:
+        # 全て失敗した場合のみ500
+        return {
+            'statusCode': 500,
+            'body': json.dumps({
+                'error': '全てのURL処理に失敗',
+                'errors': errors
+            }, ensure_ascii=False)
+        }
 
 
 def write_to_dynamodb(url, data):
@@ -75,7 +95,7 @@ def write_to_dynamodb(url, data):
     for plan in data['plans']:
         disp_name = plan['name']
         price = int(re.sub(r'\D', '', plan['price'])) if plan['price'] else 0
-        plan_id = plan.get('id', 'plan_' + hashlib.md5(disp_name.encode('utf-8')).hexdigest()[:8])
+        plan_id = plan.get('id', '')
 
         for formatted_date, ranges in data['reserved_times'].items():
             m, d = map(int, re.match(r'(\d+)月(\d+)日', formatted_date).groups())
@@ -104,6 +124,7 @@ def write_to_dynamodb(url, data):
                     'end_time':        slot['end_time'],
                     'price':           total_price,
                     'created_at':      now_jst.isoformat(),
+                    'processed_at':    now_jst.isoformat(),
                     'url':             data['url'],
                     'name':            data.get('name', '')
                 }
@@ -161,8 +182,8 @@ def get_reservation_data(original_url):
 
             # JSONデータを取得
             json_data = None
-            plan_id_map = {}  # プラン名とIDのマッピング
-            space_id = None
+            space_id = ''
+            plans_data = []
             try:
                 script_el = page.query_selector('script#__NEXT_DATA__')
                 if script_el:
@@ -170,20 +191,12 @@ def get_reservation_data(original_url):
                     json_data = json.loads(json_str)
                     # spaceIdを取得（roomFragment.id）
                     room_fragment = json_data.get('props', {}).get('pageProps', {}).get('roomFragment', {})
-                    space_id = room_fragment.get('id')
+                    space_id = room_fragment.get('id', '')
                     # プラン情報を取得
                     plans_data = room_fragment.get('plans', {}).get('results', [])
-                    for plan_data in plans_data:
-                        plan_name = plan_data.get('name', '')
-                        plan_id = plan_data.get('id', '')
-                        if plan_name and plan_id:
-                            plan_id_map[plan_name] = plan_id
             except Exception as e:
                 print(f"JSON取得エラー: {e}")
-
-            # spaceIdが取得できなかった場合はURLから取得したものを使用
-            if not space_id:
-                space_id = space_id_from_url
+                space_id = ''
 
             # スペース名取得
             space_name = ''
@@ -207,14 +220,28 @@ def get_reservation_data(original_url):
                 elems = page.query_selector_all("li.css-1vwbwmt, li.css-1cpdoqx")
                 if not elems:
                     elems = page.query_selector_all("li button span.css-k6zetj")
-                for plan in elems:
+                for i, plan in enumerate(elems):
                     try:
-                        name_el = plan.query_selector(".css-k6zetj")
-                        plan_name = name_el.inner_text() if name_el else plan.inner_text()
-                        price_el = plan.query_selector(".css-1y4ezd0, .css-1sq1blk, .css-d362cm")
-                        price = price_el.inner_text() if price_el else "価格不明"
-                        # plan_id_mapからIDを取得
-                        plan_id = plan_id_map.get(plan_name, 'plan_' + hashlib.md5(plan_name.encode('utf-8')).hexdigest()[:8])
+                        # 価格取得ロジック（優先順位に従って取得）
+                        price = "価格不明"
+                        price_el = plan.query_selector(".css-1y4ezd0")
+                        if price_el:
+                            price = price_el.inner_text()
+                        else:
+                            price_el = plan.query_selector(".css-d362cm")
+                            if price_el:
+                                price = price_el.inner_text()
+                            else:
+                                price_el = plan.query_selector(".css-1sq1blk")
+                                if price_el:
+                                    price = price_el.inner_text()
+                        
+                        # JSONデータからIDと名前を取得
+                        plan_id = ''
+                        plan_name = ''
+                        if i < len(plans_data):
+                            plan_id = plans_data[i].get('id', '')
+                            plan_name = plans_data[i].get('name', '')
                         plans.append({'name': plan_name, 'price': price, 'id': plan_id})
                     except:
                         pass
