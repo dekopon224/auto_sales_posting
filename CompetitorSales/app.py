@@ -51,10 +51,11 @@ def write_to_dynamodb(url, data):
     reservation_data の構造
       {
         'url': ...,
-        'plans': [ {'name': planDisplayName, 'price': priceStr}, ... ],
+        'plans': [ {'name': planDisplayName, 'price': priceStr, 'id': planId}, ... ],
         'reserved_times': { '5月17日': [ {...}, … ], … },
         'timestamp': '2025-05-16T08:00:00+09:00',
-        'name': space_name
+        'name': space_name,
+        'space_id': space_id
       }
     を展開して、CompetitorSales テーブルへ put_item します。
     """
@@ -65,12 +66,8 @@ def write_to_dynamodb(url, data):
     room_match = re.search(r'/p/([^/?]+)', url)
     room_uid = room_match.group(1) if room_match else None
 
-    # spaceId は data の URL をもとに生成
-    space_match = re.search(r'/spaces/([^/]+)/', data['url'])
-    if space_match:
-        space_id = space_match.group(1)
-    else:
-        space_id = "unknown_" + hashlib.md5(url.encode('utf-8')).hexdigest()[:10]
+    # spaceId はJSONから取得したものを使用
+    space_id = data.get('space_id', 'unknown')
 
     JST = timezone(timedelta(hours=9))
     now_jst = datetime.now(JST)
@@ -78,7 +75,7 @@ def write_to_dynamodb(url, data):
     for plan in data['plans']:
         disp_name = plan['name']
         price = int(re.sub(r'\D', '', plan['price'])) if plan['price'] else 0
-        plan_id = 'plan_' + hashlib.md5(disp_name.encode('utf-8')).hexdigest()[:8]
+        plan_id = plan.get('id', 'plan_' + hashlib.md5(disp_name.encode('utf-8')).hexdigest()[:8])
 
         for formatted_date, ranges in data['reserved_times'].items():
             m, d = map(int, re.match(r'(\d+)月(\d+)日', formatted_date).groups())
@@ -147,12 +144,12 @@ def get_reservation_data(original_url):
             room_match = re.search(r'/p/([^/?]+)', original_url)
             if not space_match or not room_match:
                 return {'error': 'spaceId または roomUid の抽出失敗'}
-            space_id = space_match.group(1)
+            space_id_from_url = space_match.group(1)
             room_uid = room_match.group(1)
 
             # 3) 予約ページ URL を組み立てて遷移
             reservation_url = (
-                f"https://www.spacemarket.com/spaces/{space_id}"
+                f"https://www.spacemarket.com/spaces/{space_id_from_url}"
                 f"/rooms/{room_uid}/reservations/new/"
                 "?from=room_reservation_button&price_type=HOURLY&promotion_ids=4808&rent_type=1"
             )
@@ -161,6 +158,32 @@ def get_reservation_data(original_url):
                 return {'error': f"予約ページロードエラー: {resp2.status} {resp2.status_text}"}
             page.wait_for_load_state("networkidle")
             time.sleep(3)
+
+            # JSONデータを取得
+            json_data = None
+            plan_id_map = {}  # プラン名とIDのマッピング
+            space_id = None
+            try:
+                script_el = page.query_selector('script#__NEXT_DATA__')
+                if script_el:
+                    json_str = script_el.inner_text()
+                    json_data = json.loads(json_str)
+                    # spaceIdを取得（roomFragment.id）
+                    room_fragment = json_data.get('props', {}).get('pageProps', {}).get('roomFragment', {})
+                    space_id = room_fragment.get('id')
+                    # プラン情報を取得
+                    plans_data = room_fragment.get('plans', {}).get('results', [])
+                    for plan_data in plans_data:
+                        plan_name = plan_data.get('name', '')
+                        plan_id = plan_data.get('id', '')
+                        if plan_name and plan_id:
+                            plan_id_map[plan_name] = plan_id
+            except Exception as e:
+                print(f"JSON取得エラー: {e}")
+
+            # spaceIdが取得できなかった場合はURLから取得したものを使用
+            if not space_id:
+                space_id = space_id_from_url
 
             # スペース名取得
             space_name = ''
@@ -190,7 +213,9 @@ def get_reservation_data(original_url):
                         plan_name = name_el.inner_text() if name_el else plan.inner_text()
                         price_el = plan.query_selector(".css-1y4ezd0, .css-1sq1blk, .css-d362cm")
                         price = price_el.inner_text() if price_el else "価格不明"
-                        plans.append({'name': plan_name, 'price': price})
+                        # plan_id_mapからIDを取得
+                        plan_id = plan_id_map.get(plan_name, 'plan_' + hashlib.md5(plan_name.encode('utf-8')).hexdigest()[:8])
+                        plans.append({'name': plan_name, 'price': price, 'id': plan_id})
                     except:
                         pass
             except:
@@ -257,7 +282,8 @@ def get_reservation_data(original_url):
                 'plans': plans,
                 'reserved_times': all_reserved_times,
                 'timestamp': datetime.now(timezone(timedelta(hours=9))).isoformat(),
-                'name': space_name
+                'name': space_name,
+                'space_id': space_id
             }
 
         except Exception as e:
