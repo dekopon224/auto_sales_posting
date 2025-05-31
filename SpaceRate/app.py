@@ -13,6 +13,8 @@ TABLE_NAME = os.environ.get('TABLE_NAME', 'SpaceRate')
 def lambda_handler(event, context):
     # SQSメッセージから URLs パラメータ取得
     all_urls = []
+    offset_days = 0  # デフォルトは今日から
+    scan_days = 7    # デフォルトは7日間
     
     if 'Records' in event:
         # SQSイベントの場合
@@ -20,6 +22,8 @@ def lambda_handler(event, context):
             try:
                 message_body = json.loads(record['body'])
                 urls = message_body.get('urls', [])
+                offset_days = message_body.get('offset_days', 0)
+                scan_days = message_body.get('scan_days', 7)
                 if urls and isinstance(urls, list):
                     all_urls.extend(urls)
             except Exception as e:
@@ -30,8 +34,12 @@ def lambda_handler(event, context):
         if 'body' in event:
             body = json.loads(event['body'] or '{}')
             urls = body.get('urls')
+            offset_days = body.get('offset_days', 0)
+            scan_days = body.get('scan_days', 7)
         else:
             urls = event.get('urls')
+            offset_days = event.get('offset_days', 0)
+            scan_days = event.get('scan_days', 7)
         if urls and isinstance(urls, list):
             all_urls = urls
         elif event.get('url'):
@@ -46,7 +54,7 @@ def lambda_handler(event, context):
     
     for url in all_urls:
         try:
-            items = scrape_hourly_prices(url)
+            items = scrape_hourly_prices(url, days=scan_days, offset_days=offset_days)
             if items:
                 write_items_to_dynamodb(items)
                 all_items.extend(items)
@@ -65,7 +73,12 @@ def lambda_handler(event, context):
                 'successful': len(all_items),
                 'failed': len(errors),
                 'records': len(all_items),
-                'errors': errors
+                'errors': errors,
+                'scan_info': {
+                    'offset_days': offset_days,
+                    'scan_days': scan_days,
+                    'start_date': (datetime.now(timezone(timedelta(hours=9))) + timedelta(days=offset_days)).strftime('%Y-%m-%d')
+                }
             }, ensure_ascii=False)
         }
     else:
@@ -79,7 +92,7 @@ def lambda_handler(event, context):
         }
 
 
-def scrape_hourly_prices(original_url, days=7):
+def scrape_hourly_prices(original_url, days=7, offset_days=0):
     """
     指定 URL のスペースマーケット予約ページから
     指定日数分の1時間単位プラン価格情報を取得し、
@@ -169,9 +182,9 @@ def scrape_hourly_prices(original_url, days=7):
                 space_name = ''
 
             # 対象日付リスト
-            base = datetime.now(JST)
+            base = datetime.now(JST) + timedelta(days=offset_days)
             dates = [base + timedelta(days=i) for i in range(days)]
-            print(f"処理対象日付: {[d.strftime('%Y-%m-%d') for d in dates]}")
+            print(f"処理対象日付 (offset={offset_days}日): {[d.strftime('%Y-%m-%d') for d in dates]}")
 
             # プラン情報取得（JSONデータから）
             plan_map = {}  # プランindexとデータの対応
@@ -268,7 +281,9 @@ def scrape_hourly_prices(original_url, days=7):
                             'planDisplayName': plan_display_name,
                             'price': price,
                             'day_type': day_type,
-                            'created_at': now_jst.isoformat()
+                            'created_at': now_jst.isoformat(),
+                            'scan_date': now_jst.strftime('%Y-%m-%d'),  # スキャン実行日
+                            'forecast_days': offset_days  # 何日先のデータか
                         }
                         items.append(item)
             
