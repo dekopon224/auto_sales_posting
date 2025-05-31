@@ -171,6 +171,7 @@ def scrape_hourly_prices(original_url, days=7):
             # 対象日付リスト
             base = datetime.now(JST)
             dates = [base + timedelta(days=i) for i in range(days)]
+            print(f"処理対象日付: {[d.strftime('%Y-%m-%d') for d in dates]}")
 
             # プラン情報取得（JSONデータから）
             plan_map = {}  # プランindexとデータの対応
@@ -184,6 +185,7 @@ def scrape_hourly_prices(original_url, days=7):
                 # 日付ラベル
                 date_label = f"{current_date.year}年{current_date.month}月{current_date.day}日"
                 iso_date = current_date.strftime('%Y-%m-%d')
+                print(f"処理中の日付: {iso_date}")
                 # 曜日種別
                 dow = current_date.weekday()
                 day_type = 'weekday' if dow < 5 else 'weekend'
@@ -191,14 +193,30 @@ def scrape_hourly_prices(original_url, days=7):
                 # 日付選択
                 btn = page.locator(f'button[aria-label="{date_label}"]')
                 try:
+                    # ボタンが見つからない場合は次の月に移動
+                    if btn.count() == 0:
+                        # 次の月ボタンをクリック
+                        next_month_btn = page.locator('button[aria-label="次の月"]')
+                        if next_month_btn.count() > 0:
+                            next_month_btn.click()
+                            time.sleep(1)
+                            # 再度日付ボタンを探す
+                            btn = page.locator(f'button[aria-label="{date_label}"]')
+                    
+                    if btn.count() == 0:
+                        print(f"日付ボタンが見つかりません: {date_label}")
+                        continue
+                    
                     btn.click()
                     time.sleep(2)
-                except:
+                except Exception as e:
+                    print(f"日付選択エラー: {date_label} - {e}")
                     continue
 
                 # 利用可能時間帯取得
                 hours = get_available_hours(page)
                 hours.sort()
+                print(f"  利用可能時間帯 ({iso_date}): {hours}")
 
                 for hour in hours:
                     # 24時以上は翌日の時間として処理
@@ -253,6 +271,8 @@ def scrape_hourly_prices(original_url, days=7):
                             'created_at': now_jst.isoformat()
                         }
                         items.append(item)
+            
+            print(f"スクレイピング完了 ({original_url}): {len(items)}件のデータを取得")
 
         except Exception as e:
             print(f"スクレイピングエラー ({original_url}): {e}")
