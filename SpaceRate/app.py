@@ -6,9 +6,45 @@ import time
 from datetime import datetime, timedelta, timezone
 import boto3
 from playwright.sync_api import sync_playwright
+import urllib.request
 
 # DynamoDB テーブル名は環境変数から取得
 TABLE_NAME = os.environ.get('TABLE_NAME', 'SpaceRate')
+
+# 祝日データのキャッシュ（Lambda実行中は保持）
+_holidays_cache = None
+_holidays_cache_time = None
+HOLIDAYS_CACHE_DURATION = 3600  # 1時間
+
+def get_japan_holidays():
+    """日本の祝日データを取得（キャッシュ付き）"""
+    global _holidays_cache, _holidays_cache_time
+    
+    now = time.time()
+    
+    # キャッシュが有効な場合はそれを返す
+    if _holidays_cache is not None and _holidays_cache_time is not None:
+        if now - _holidays_cache_time < HOLIDAYS_CACHE_DURATION:
+            return _holidays_cache
+    
+    try:
+        # 祝日APIからデータ取得
+        url = "https://holidays-jp.github.io/api/v1/date.json"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            holidays_data = json.loads(response.read().decode('utf-8'))
+            _holidays_cache = holidays_data
+            _holidays_cache_time = now
+            return holidays_data
+    except Exception as e:
+        print(f"祝日データ取得エラー: {e}")
+        # エラー時は空の辞書を返す（通常の曜日判定にフォールバック）
+        return {}
+
+def is_holiday(date_obj):
+    """指定された日付が祝日かどうかを判定"""
+    holidays = get_japan_holidays()
+    date_str = date_obj.strftime('%Y-%m-%d')
+    return date_str in holidays
 
 def lambda_handler(event, context):
     # SQSメッセージから URLs パラメータ取得
@@ -199,9 +235,12 @@ def scrape_hourly_prices(original_url, days=7, offset_days=0):
                 date_label = f"{current_date.year}年{current_date.month}月{current_date.day}日"
                 iso_date = current_date.strftime('%Y-%m-%d')
                 print(f"処理中の日付: {iso_date}")
-                # 曜日種別
+                # 曜日種別（祝日判定を追加）
                 dow = current_date.weekday()
-                day_type = 'weekday' if dow < 5 else 'weekend'
+                if dow >= 5 or is_holiday(current_date):  # 土日または祝日
+                    day_type = 'weekend'
+                else:
+                    day_type = 'weekday'
 
                 # 日付選択
                 btn = page.locator(f'button[aria-label="{date_label}"]')
@@ -240,9 +279,12 @@ def scrape_hourly_prices(original_url, days=7, offset_days=0):
                         # 24時以上の場合は翌日の相当する時間に変換
                         target_date = current_date + timedelta(days=1)
                         target_hour = hour - 24
-                        # 翌日の曜日種別を再計算
+                        # 翌日の曜日種別を再計算（祝日判定を追加）
                         dow = target_date.weekday()
-                        day_type = 'weekday' if dow < 5 else 'weekend'
+                        if dow >= 5 or is_holiday(target_date):  # 土日または祝日
+                            day_type = 'weekend'
+                        else:
+                            day_type = 'weekday'
                     
                     # 日付をISO形式で生成
                     target_iso_date = target_date.strftime('%Y-%m-%d')
