@@ -230,7 +230,7 @@ def get_reservation_data(original_url):
 
             # 日付リスト生成
             today = datetime.now(timezone(timedelta(hours=9)))
-            dates = [today + timedelta(days=i) for i in range(14)]
+            dates = [today + timedelta(days=i) for i in range(28)]
 
             # プラン情報取得 （既存ロジック）
             plans = []
