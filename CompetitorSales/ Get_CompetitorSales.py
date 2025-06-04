@@ -132,7 +132,7 @@ def get_sales_data(table, space_id, plan_id, start_date, end_date):
             'summary': {
                 'total_sales': total_sales,
                 'total_reservations': total_reservations,
-                'average_daily_sales': total_sales / 15 if total_sales > 0 else 0
+                'average_daily_sales': total_sales / 28 if total_sales > 0 else 0
             },
             'daily_sales': sorted_sales
         }
@@ -148,7 +148,7 @@ def get_sales_data(table, space_id, plan_id, start_date, end_date):
 def lambda_handler(event, context):
     """
     spaceId（と任意の planId）を受け取り、
-    今日から2週間先までの売上をプラン単位でまとめて返す
+    今日から4週間先までの売上をプラン単位でまとめて返す
     """
     # リクエストボディの解析
     try:
@@ -178,10 +178,10 @@ def lambda_handler(event, context):
     dynamodb = boto3.resource('dynamodb')
     table = dynamodb.Table(TABLE_NAME)
 
-    # 期間：今日から2週間先
+    # 期間：今日から4週間先
     now_jst = datetime.now(JST)
     start_date = now_jst.date()
-    end_date = start_date + timedelta(days=14)
+    end_date = start_date + timedelta(days=28)
 
     results = []
     successful_count = 0

@@ -48,10 +48,10 @@ function updateSalesSheet() {
     
     const results = data.results;
 
-    // 3) 日付ヘッダー（1行目、O〜AB列に14日分）
+    // 3) 日付ヘッダー（1行目、O〜AP列に28日分）
     const startDate = new Date(data.period.start);
     const dateHeaders = [];
-    for (let i = 0; i < 14; i++) {
+    for (let i = 0; i < 28; i++) {
       const d = new Date(startDate);
       d.setDate(d.getDate() + i);
       const txt = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
@@ -121,7 +121,7 @@ function updateSalesSheet() {
       // エラーがあったスペースの場合
       if (errorSpaces.includes(spaceId)) {
         sh.getRange(row, 4).setValue('エラー');
-        sh.getRange(row, 15, 1, 14).clearContent();
+        sh.getRange(row, 15, 1, 28).clearContent();
         return;
       }
 
@@ -148,14 +148,14 @@ function updateSalesSheet() {
         salesArr.forEach(s => salesMap[s.date] = s.sales);
         
         // 日付に基づいて売上を設定
-        for (let i = 0; i < 14; i++) {
+        for (let i = 0; i < 28; i++) {
           const dateKey = dateHeaders[i];
           const val = salesMap[dateKey] || 0;
           sh.getRange(row, 15 + i).setValue(val);
         }
       } else {
         // 選択なし or データなしならクリア
-        sh.getRange(row, 15, 1, 14).clearContent();
+        sh.getRange(row, 15, 1, 28).clearContent();
       }
     });
     
@@ -172,7 +172,7 @@ function updateSalesSheet() {
 /**
  * ドロップダウン編集時に呼ばれるトリガー
  * D列(4) の 2,5,8...行だけをキャッチ
- * 選択プラン名に応じて O〜AB に 14日分の売上を表示
+ * 選択プラン名に応じて O〜AP に 28日分の売上を表示
  */
 function onEdit(e) {
   if (!e) return;
@@ -209,14 +209,14 @@ function onEdit(e) {
 
     if (dateHeaders) {
       // キャッシュされた日付ヘッダーを使用
-      for (let i = 0; i < 14 && i < dateHeaders.length; i++) {
+      for (let i = 0; i < 28 && i < dateHeaders.length; i++) {
         const val = salesMap[dateHeaders[i]] || 0;
         sheet.getRange(row, 15 + i).setValue(val);
       }
     } else {
-      // フォールバック：今日から14日分
+      // フォールバック：今日から28日分
       const today = new Date();
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 28; i++) {
         const d = new Date(today);
         d.setDate(d.getDate() + i);
         const key = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
