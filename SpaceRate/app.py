@@ -230,7 +230,7 @@ def scrape_hourly_prices(original_url, days=7, offset_days=0):
                     'name': plan_data.get('name', '')
                 }
 
-            for current_date in dates:
+            for date_index, current_date in enumerate(dates):
                 # 日付ラベル
                 date_label = f"{current_date.year}年{current_date.month}月{current_date.day}日"
                 iso_date = current_date.strftime('%Y-%m-%d')
@@ -268,7 +268,13 @@ def scrape_hourly_prices(original_url, days=7, offset_days=0):
                 # 利用可能時間帯取得
                 hours = get_available_hours(page)
                 hours.sort()
-                print(f"  利用可能時間帯 ({iso_date}): {hours}")
+                
+                # 2日目以降は0-11時をスキップ（前日の24-35時として既に処理済み）
+                if date_index > 0:
+                    hours = [h for h in hours if h >= 12]
+                    print(f"  利用可能時間帯 ({iso_date}) ※12時以降のみ処理: {hours}")
+                else:
+                    print(f"  利用可能時間帯 ({iso_date}): {hours}")
 
                 for hour in hours:
                     # 24時以上は翌日の時間として処理
