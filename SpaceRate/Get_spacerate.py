@@ -47,22 +47,15 @@ def lambda_handler(event, context):
     # 2) 取得対象となる日時（YYYY-MM-DDThh:00）の一覧を作成
     target_datetimes = _generate_target_datetimes(start_date, end_date, start_hour, end_hour)
 
-    # 3) プランごとに価格を取得し、リストに格納して平均を計算
+    # 3) バッチ処理で全プラン×全日時の価格を一括取得
+    plan_prices = _batch_fetch_prices_with_fallback(space_id, plan_ids, target_datetimes, day_type)
+
+    # 4) プランごとに平均を計算
     result = {}
     for plan_id in plan_ids:
-        prices = []
+        prices = plan_prices.get(plan_id, [])
         # 該当プランの表示名（最初に見つかったものを使う）
         display_name = plan_names.get(plan_id, '')
-
-        for dt in target_datetimes:
-            price = _fetch_price_with_fallback(
-                space_id=space_id,
-                plan_id=plan_id,
-                target_dt=dt,
-                day_type=day_type
-            )
-            if price is not None:
-                prices.append(price)
 
         if prices:
             avg_price = float(sum(prices) / len(prices))
@@ -156,67 +149,138 @@ def _generate_target_datetimes(start_date, end_date, start_hour, end_hour):
     return target_datetimes
 
 
-def _fetch_price_with_fallback(space_id, plan_id, target_dt, day_type):
+def _batch_fetch_prices_with_fallback(space_id, plan_ids, target_datetimes, day_type):
     """
-    指定の日時 target_dt（文字列 'YYYY-MM-DDThh:00'）と plan_id、day_type をもとに、
-    1) 直接取得
-    2) ±1 週間、±2 週間ずらして同時刻を取得
-    3) それでも無ければ「直前１時間」を再帰的に探す
-    を順に試みて価格 (int) を返す。見つからなければ None を返す。
+    全プラン×全日時の組み合わせについて、バッチ処理で価格を取得する。
+    フォールバック処理も含めて一括で行い、プランごとの価格リストを返す。
+    
+    Returns:
+        dict: {plan_id: [price1, price2, ...], ...}
     """
-    # ステップ 1) 直接取得
-    found = _try_get_item(space_id, plan_id, target_dt, day_type)
-    if found is not None:
-        return found
+    # 1) 全候補キーを生成（直接取得 + 週単位フォールバック + 時間遡及フォールバック）
+    all_keys = _generate_all_candidate_keys(plan_ids, target_datetimes)
+    
+    # 2) バッチで一括取得
+    all_items = _batch_get_items_with_pagination(space_id, all_keys)
+    
+    # 3) 取得結果を整理（rate_key -> item のマッピング）
+    items_map = {}
+    for item in all_items:
+        if item.get('day_type') == day_type:  # day_type フィルタリング
+            items_map[item['rate_key']] = item
+    
+    # 4) プラン×日時ごとに最適な価格を選択
+    plan_prices = {plan_id: [] for plan_id in plan_ids}
+    
+    for plan_id in plan_ids:
+        for target_dt in target_datetimes:
+            price = _find_best_price_from_candidates(plan_id, target_dt, items_map)
+            if price is not None:
+                plan_prices[plan_id].append(price)
+    
+    return plan_prices
 
-    # ステップ 2) 先週・先々週・来週・再来週
+
+def _generate_all_candidate_keys(plan_ids, target_datetimes):
+    """
+    全プラン×全日時について、フォールバック含む全候補のrate_keyを生成する。
+    
+    Returns:
+        set: 重複除去されたrate_keyのセット
+    """
+    all_keys = set()
+    
+    for plan_id in plan_ids:
+        for target_dt in target_datetimes:
+            # 1) 直接取得
+            direct_key = f"{target_dt}#{plan_id}"
+            all_keys.add(direct_key)
+            
+            # 2) 週単位フォールバック（±1週間、±2週間）
+            base_dt = datetime.strptime(target_dt, '%Y-%m-%dT%H:%M')
+            for week_offset in [7, 14, -7, -14]:
+                fallback_dt = base_dt + timedelta(days=week_offset)
+                fallback_key = f"{fallback_dt.strftime('%Y-%m-%dT%H:00')}#{plan_id}"
+                all_keys.add(fallback_key)
+            
+            # 3) 時間遡及フォールバック（最大24時間前まで）
+            for hour_offset in range(1, 25):
+                prev_dt = base_dt - timedelta(hours=hour_offset)
+                prev_key = f"{prev_dt.strftime('%Y-%m-%dT%H:00')}#{plan_id}"
+                all_keys.add(prev_key)
+    
+    return all_keys
+
+
+def _batch_get_items_with_pagination(space_id, rate_keys):
+    """
+    batch_get_itemの100件制限に対応した分割処理で、全アイテムを取得する。
+    
+    Returns:
+        list: 取得されたアイテムのリスト
+    """
+    all_items = []
+    rate_keys_list = list(rate_keys)
+    
+    # 100件ずつに分割して処理
+    for i in range(0, len(rate_keys_list), 100):
+        batch_keys = rate_keys_list[i:i+100]
+        
+        # DynamoDB用のキー形式に変換
+        request_items = {
+            TABLE_NAME: {
+                'Keys': [
+                    {'spaceId': space_id, 'rate_key': rate_key}
+                    for rate_key in batch_keys
+                ]
+            }
+        }
+        
+        # UnprocessedKeysがある限り再試行
+        while request_items:
+            try:
+                response = dynamodb.batch_get_item(RequestItems=request_items)
+                
+                # 取得結果を追加
+                if TABLE_NAME in response.get('Responses', {}):
+                    all_items.extend(response['Responses'][TABLE_NAME])
+                
+                # 未処理のキーがあれば次回のリクエストに設定
+                request_items = response.get('UnprocessedKeys', {})
+                
+            except Exception as e:
+                print(f"batch_get_item error: {e}")
+                break  # エラーの場合は処理を中断
+    
+    return all_items
+
+
+def _find_best_price_from_candidates(plan_id, target_dt, items_map):
+    """
+    指定されたプランと日時について、フォールバック優先順位に基づいて最適な価格を選択する。
+    
+    Returns:
+        int or None: 見つかった価格、見つからない場合はNone
+    """
     base_dt = datetime.strptime(target_dt, '%Y-%m-%dT%H:%M')
+    
+    # 優先順位1: 直接取得
+    direct_key = f"{target_dt}#{plan_id}"
+    if direct_key in items_map:
+        return int(items_map[direct_key].get('price', 0))
+    
+    # 優先順位2: 週単位フォールバック
     for week_offset in [7, 14, -7, -14]:
         fallback_dt = base_dt + timedelta(days=week_offset)
-        fallback_key = fallback_dt.strftime('%Y-%m-%dT%H:00')
-        found = _try_get_item(space_id, plan_id, fallback_key, day_type)
-        if found is not None:
-            return found
-
-    # ステップ 3) 「直前１時間」を再帰的に探す
-    return _fetch_previous_hour_price(space_id, plan_id, base_dt, day_type, max_hours=24)
-
-
-def _try_get_item(space_id, plan_id, dt_key, day_type):
-    """
-    DynamoDB からキー (spaceId, rate_key=dt_key#plan_id) で item を取得し、day_type が合っていれば price を返す。
-    該当なしや day_type 不整合の場合は None を返す。
-    """
-    rate_key = f"{dt_key}#{plan_id}"
-    try:
-        resp = table.get_item(Key={'spaceId': space_id, 'rate_key': rate_key})
-        item = resp.get('Item')
-        if not item:
-            return None
-
-        # day_type が一致しなければ None (「平日か週末か」は厳密に指定)
-        if item.get('day_type') != day_type:
-            return None
-
-        return int(item.get('price', 0))
-    except Exception:
-        return None
-
-
-def _fetch_previous_hour_price(space_id, plan_id, dt_obj, day_type, max_hours=24):
-    """
-    target_dt（datetime オブジェクト）の「1時間前、2時間前、...」とさかのぼって
-    _try_get_item が見つかるまで再帰的に探索。最大 max_hours だけさかのぼる。
-    見つかれば price を返し、最後まで見つからなければ None。
-    """
-    if max_hours <= 0:
-        return None
-
-    # １時間前を計算
-    prev_dt = dt_obj - timedelta(hours=1)
-    prev_key = prev_dt.strftime('%Y-%m-%dT%H:00')
-    found = _try_get_item(space_id, plan_id, prev_key, day_type)
-    if found is not None:
-        return found
-    else:
-        return _fetch_previous_hour_price(space_id, plan_id, prev_dt, day_type, max_hours - 1)
+        fallback_key = f"{fallback_dt.strftime('%Y-%m-%dT%H:00')}#{plan_id}"
+        if fallback_key in items_map:
+            return int(items_map[fallback_key].get('price', 0))
+    
+    # 優先順位3: 時間遡及フォールバック
+    for hour_offset in range(1, 25):
+        prev_dt = base_dt - timedelta(hours=hour_offset)
+        prev_key = f"{prev_dt.strftime('%Y-%m-%dT%H:00')}#{plan_id}"
+        if prev_key in items_map:
+            return int(items_map[prev_key].get('price', 0))
+    
+    return None
