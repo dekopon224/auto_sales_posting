@@ -63,6 +63,7 @@ def lambda_handler(event, context):
             avg_price = None
 
         result[plan_id] = {
+            'planId': plan_id,
             'planDisplayName': display_name,
             'average_price': avg_price,
             'samples_count': len(prices)
