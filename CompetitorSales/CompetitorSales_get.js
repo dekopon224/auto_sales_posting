@@ -48,15 +48,10 @@ function updateSalesSheet() {
     
     const results = data.results;
 
-    // 3) 日付ヘッダー（1行目、O〜AP列に28日分）
-    const startDate = new Date(data.period.start);
-    const dateHeaders = [];
-    for (let i = 0; i < 28; i++) {
-      const d = new Date(startDate);
-      d.setDate(d.getDate() + i);
-      const txt = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd');
-      sh.getRange(1, 15 + i).setValue(txt);
-      dateHeaders.push(Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd'));
+    // 3) 日付ヘッダーの構築（O列から開始）
+    // ヘッダーが既に設定されているかチェック
+    if (sh.getRange(1, 15).getValue() !== '2025年合計') {
+      setupDateHeaders(sh);
     }
 
     // 4) キャッシュ用データ構築
@@ -102,8 +97,6 @@ function updateSalesSheet() {
     
     // キャッシュ保存（6時間）
     CacheService.getScriptCache().put('salesCache', JSON.stringify(cache), 6 * 60 * 60);
-    // 日付ヘッダーも保存
-    CacheService.getScriptCache().put('dateHeaders', JSON.stringify(dateHeaders), 6 * 60 * 60);
 
     // 5) 各グループのドロップダウン設定＋売上更新
     groups.forEach(({ spaceId, row }) => {
@@ -121,7 +114,8 @@ function updateSalesSheet() {
       // エラーがあったスペースの場合
       if (errorSpaces.includes(spaceId)) {
         sh.getRange(row, 4).setValue('エラー');
-        sh.getRange(row, 15, 1, 28).clearContent();
+        // 年合計・月合計のセルに数式を設定
+        setTotalFormulas(sh, row);
         return;
       }
 
@@ -143,20 +137,11 @@ function updateSalesSheet() {
       // 選択されているプランの売上を表示
       const selectedPlan = sh.getRange(row, 4).getValue().toString().trim();
       if (selectedPlan && cache[spaceId] && cache[spaceId][selectedPlan]) {
-        const salesArr = cache[spaceId][selectedPlan];
-        const salesMap = {};
-        salesArr.forEach(s => salesMap[s.date] = s.sales);
-        
-        // 日付に基づいて売上を設定
-        for (let i = 0; i < 28; i++) {
-          const dateKey = dateHeaders[i];
-          const val = salesMap[dateKey] || 0;
-          sh.getRange(row, 15 + i).setValue(val);
-        }
-      } else {
-        // 選択なし or データなしならクリア
-        sh.getRange(row, 15, 1, 28).clearContent();
+        updateSalesData(sh, row, cache[spaceId][selectedPlan]);
       }
+      
+      // 年合計・月合計の数式を設定
+      setTotalFormulas(sh, row);
     });
     
     // 成功メッセージ
@@ -170,9 +155,162 @@ function updateSalesSheet() {
 }
 
 /**
+ * 日付ヘッダーを設定する関数
+ */
+function setupDateHeaders(sheet) {
+  const startCol = 15; // O列
+  let col = startCol;
+  
+  // O列: 2025年合計
+  sheet.getRange(1, col).setValue('2025年合計');
+  col++;
+  
+  // 今日の日付を取得
+  const today = new Date();
+  const currentMonth = today.getMonth() + 1; // 0ベースなので+1
+  const currentDay = today.getDate();
+  
+  // 2025年6月から12月までのヘッダーを作成
+  for (let month = 6; month <= 12; month++) {
+    // 月合計列
+    sheet.getRange(1, col).setValue(`${month}月合計`);
+    col++;
+    
+    // 該当月の日数を取得
+    const daysInMonth = new Date(2025, month, 0).getDate();
+    
+    // 日毎のヘッダー
+    const startDay = (month === 6) ? 11 : 1; // 6月は11日から開始
+    for (let day = startDay; day <= daysInMonth; day++) {
+      const dateStr = `2025/${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`;
+      sheet.getRange(1, col).setValue(dateStr);
+      col++;
+    }
+  }
+}
+
+/**
+ * 売上データを更新する関数
+ */
+function updateSalesData(sheet, row, salesData) {
+  const startCol = 15; // O列から開始
+  
+  // 売上データを日付→売上のマップに変換
+  const salesMap = {};
+  salesData.forEach(item => {
+    salesMap[item.date] = item.sales;
+  });
+  
+  // ヘッダー行から日付を読み取り、対応する売上を設定
+  let col = startCol + 1; // P列から開始（O列は年合計なのでスキップ）
+  
+  for (let month = 6; month <= 12; month++) {
+    col++; // 月合計列をスキップ
+    
+    const daysInMonth = new Date(2025, month, 0).getDate();
+    const startDay = (month === 6) ? 11 : 1; // 6月は11日から開始
+    
+    for (let day = startDay; day <= daysInMonth; day++) { // ← startDayから開始
+      const dateKey = `2025-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const header = sheet.getRange(1, col).getValue();
+      
+      if (header && header.toString().includes('/')) {
+        // APIから取得したデータがある場合のみ更新
+        if (salesMap.hasOwnProperty(dateKey)) {
+          sheet.getRange(row, col).setValue(salesMap[dateKey]);
+        }
+        // データがない場合は既存の値を保持（何もしない）
+      }
+      col++;
+    }
+  }
+}
+
+/**
+ * 年合計・月合計の数式を設定する関数
+ */
+function setTotalFormulas(sheet, row) {
+  const startCol = 15; // O列
+  
+  // O列: 2025年合計の数式
+  const yearFormula = createYearTotalFormula(row);
+  sheet.getRange(row, startCol).setFormula(yearFormula);
+  
+  // 各月の合計数式を設定
+  let col = startCol + 1; // P列から
+  for (let month = 6; month <= 12; month++) {
+    const monthFormula = createMonthTotalFormula(row, month);
+    sheet.getRange(row, col).setFormula(monthFormula);
+    
+    // 次の月合計列の位置を計算
+    const daysInMonth = new Date(2025, month, 0).getDate();
+    const startDay = (month === 6) ? 11 : 1; // 6月は11日から
+    const actualDays = daysInMonth - startDay + 1;
+    col += actualDays + 1; // ← 実際の日数を使用
+  }
+}
+
+/**
+ * 年合計の数式を作成
+ */
+function createYearTotalFormula(row) {
+  const ranges = [];
+  let col = 17; // Q列から開始（6月11日）
+  
+  for (let month = 6; month <= 12; month++) {
+    const daysInMonth = new Date(2025, month, 0).getDate();
+    const startDay = (month === 6) ? 11 : 1; // 6月は11日から
+    const actualDays = daysInMonth - startDay + 1;
+    const startColLetter = columnToLetter(col);
+    const endColLetter = columnToLetter(col + actualDays - 1);
+    ranges.push(`${startColLetter}${row}:${endColLetter}${row}`);
+    col += actualDays + 1; // 実際の日数 + 次の月合計列
+  }
+  
+  return `=SUM(${ranges.join(',')})`;
+}
+
+
+/**
+ * 月合計の数式を作成
+ */
+function createMonthTotalFormula(row, month) {
+  let col = 17; // Q列から開始
+  
+  // 指定月の開始列を見つける
+  for (let m = 6; m < month; m++) {
+    const daysInMonth = new Date(2025, m, 0).getDate();
+    const startDay = (m === 6) ? 11 : 1; // 6月は11日から
+    const actualDays = daysInMonth - startDay + 1;
+    col += actualDays + 1;
+  }
+  
+  const daysInMonth = new Date(2025, month, 0).getDate();
+  const startDay = (month === 6) ? 11 : 1; // 6月は11日から
+  const actualDays = daysInMonth - startDay + 1;
+  const startColLetter = columnToLetter(col);
+  const endColLetter = columnToLetter(col + actualDays - 1);
+  
+  return `=SUM(${startColLetter}${row}:${endColLetter}${row})`;
+}
+
+/**
+ * 列番号をアルファベットに変換
+ */
+function columnToLetter(column) {
+  let temp, letter = '';
+  while (column > 0) {
+    temp = (column - 1) % 26;
+    letter = String.fromCharCode(temp + 65) + letter;
+    column = (column - temp - 1) / 26;
+  }
+  return letter;
+}
+
+/**
  * ドロップダウン編集時に呼ばれるトリガー
  * D列(4) の 2,5,8...行だけをキャッチ
- * 選択プラン名に応じて O〜AP に 28日分の売上を表示
+ * 選択プラン名に応じて該当日付に売上を表示
  */
 function onEdit(e) {
   if (!e) return;
@@ -190,7 +328,6 @@ function onEdit(e) {
   try {
     // キャッシュから読み出し
     const cacheRaw = CacheService.getScriptCache().get('salesCache');
-    const dateHeadersRaw = CacheService.getScriptCache().get('dateHeaders');
     
     if (!cacheRaw) {
       console.error('キャッシュが見つかりません。updateSalesSheetを実行してください。');
@@ -198,33 +335,24 @@ function onEdit(e) {
     }
     
     const cache = JSON.parse(cacheRaw);
-    const dateHeaders = dateHeadersRaw ? JSON.parse(dateHeadersRaw) : null;
     
     const spaceId = sheet.getRange(row, 3).getDisplayValue().toString().trim();
     const salesArr = (cache[spaceId] && cache[spaceId][planName]) || [];
 
-    // 日付→売上 のマップ化
-    const salesMap = {};
-    salesArr.forEach(d => salesMap[d.date] = d.sales);
-
-    if (dateHeaders) {
-      // キャッシュされた日付ヘッダーを使用
-      for (let i = 0; i < 28 && i < dateHeaders.length; i++) {
-        const val = salesMap[dateHeaders[i]] || 0;
-        sheet.getRange(row, 15 + i).setValue(val);
-      }
-    } else {
-      // フォールバック：今日から28日分
-      const today = new Date();
-      for (let i = 0; i < 28; i++) {
-        const d = new Date(today);
-        d.setDate(d.getDate() + i);
-        const key = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
-        const val = salesMap[key] || 0;
-        sheet.getRange(row, 15 + i).setValue(val);
-      }
-    }
+    // 売上データを更新
+    updateSalesData(sheet, row, salesArr);
+    
+    // 年合計・月合計の数式を設定（念のため）
+    setTotalFormulas(sheet, row);
+    
   } catch (error) {
     console.error('onEdit error:', error);
   }
+}
+
+// 初回セットアップ用（手動実行）
+function initialSetup() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName('単価/売上');
+  setupDateHeaders(sh);
 }
