@@ -155,7 +155,8 @@ function updateSalesSheet() {
 }
 
 /**
- * 日付ヘッダーを設定する関数
+ * 日付ヘッダーを設定する関数（修正版）
+ * 日付を確実に文字列として設定
  */
 function setupDateHeaders(sheet) {
   const startCol = 15; // O列
@@ -183,14 +184,42 @@ function setupDateHeaders(sheet) {
     const startDay = (month === 6) ? 11 : 1; // 6月は11日から開始
     for (let day = startDay; day <= daysInMonth; day++) {
       const dateStr = `2025/${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`;
-      sheet.getRange(1, col).setValue(dateStr);
+      // 明示的に文字列として設定
+      sheet.getRange(1, col).setValue(dateStr.toString());
       col++;
     }
   }
 }
 
 /**
- * 売上データを更新する関数
+ * ヘッダーを強制的に文字列に修正する関数
+ * 既存の日付オブジェクトを文字列に変換
+ */
+function fixDateHeaders() {
+  const SHEET_NAME = '単価/売上';
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(SHEET_NAME);
+  
+  const startCol = 15; // O列
+  const lastCol = sh.getLastColumn();
+  
+  for (let col = startCol; col <= lastCol; col++) {
+    const header = sh.getRange(1, col).getValue();
+    
+    // 日付オブジェクトの場合、文字列に変換
+    if (header instanceof Date) {
+      const year = header.getFullYear();
+      const month = String(header.getMonth() + 1).padStart(2, '0');
+      const day = String(header.getDate()).padStart(2, '0');
+      const dateStr = `${year}/${month}/${day}`;
+      sh.getRange(1, col).setValue(dateStr);
+      console.log(`Fixed header at col ${col}: ${dateStr}`);
+    }
+  }
+}
+
+/**
+ * 売上データを更新する関数（0円表示対応版）
  */
 function updateSalesData(sheet, row, salesData) {
   const startCol = 15; // O列から開始
@@ -201,25 +230,51 @@ function updateSalesData(sheet, row, salesData) {
     salesMap[item.date] = item.sales;
   });
   
+  // デバッグ用：どの日付のデータがあるか確認
+  console.log(`Row ${row} - Available dates:`, Object.keys(salesMap).sort());
+  
   // ヘッダー行から日付を読み取り、対応する売上を設定
   let col = startCol + 1; // P列から開始（O列は年合計なのでスキップ）
   
   for (let month = 6; month <= 12; month++) {
-    col++; // 月合計列をスキップ
+    // 月合計列は既にcolが指している
+    const monthTotalCol = col;
+    col++; // 月合計列をスキップして、その月の最初の日付列へ
     
     const daysInMonth = new Date(2025, month, 0).getDate();
     const startDay = (month === 6) ? 11 : 1; // 6月は11日から開始
     
-    for (let day = startDay; day <= daysInMonth; day++) { // ← startDayから開始
+    for (let day = startDay; day <= daysInMonth; day++) {
       const dateKey = `2025-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const header = sheet.getRange(1, col).getValue();
       
-      if (header && header.toString().includes('/')) {
-        // APIから取得したデータがある場合のみ更新
-        if (salesMap.hasOwnProperty(dateKey)) {
-          sheet.getRange(row, col).setValue(salesMap[dateKey]);
+      // ヘッダーが日付かどうかを判定（日付オブジェクトまたは日付文字列）
+      let isDateHeader = false;
+      
+      if (header) {
+        // 日付オブジェクトの場合
+        if (header instanceof Date) {
+          isDateHeader = true;
         }
-        // データがない場合は既存の値を保持（何もしない）
+        // 文字列で日付形式の場合（YYYY/MM/DD）
+        else if (typeof header === 'string' && header.match(/^\d{4}\/\d{2}\/\d{2}$/)) {
+          isDateHeader = true;
+        }
+        // 日付オブジェクトのtoString()形式の場合
+        else if (header.toString().includes('GMT')) {
+          isDateHeader = true;
+        }
+      }
+      
+      // デバッグ用：ヘッダーと日付キーの対応を確認
+      if (month === 7 && day >= 6 && day <= 10) {
+        console.log(`Col ${col}, DateKey: ${dateKey}, Has data: ${salesMap.hasOwnProperty(dateKey)}, IsDateHeader: ${isDateHeader}`);
+      }
+      
+      if (isDateHeader) {
+        // APIから取得したデータがある場合はその値を、ない場合は0を設定
+        const value = salesMap.hasOwnProperty(dateKey) ? salesMap[dateKey] : 0;
+        sheet.getRange(row, col).setValue(value);
       }
       col++;
     }
