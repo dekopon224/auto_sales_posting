@@ -219,19 +219,27 @@ function fixDateHeaders() {
 }
 
 /**
- * 売上データを更新する関数（0円表示対応版）
+ * 売上データを更新する関数（期間考慮版）
+ * APIの取得期間内のみ0円表示、期間外は空欄
  */
 function updateSalesData(sheet, row, salesData) {
   const startCol = 15; // O列から開始
   
   // 売上データを日付→売上のマップに変換
   const salesMap = {};
+  let minDate = null;
+  let maxDate = null;
+  
   salesData.forEach(item => {
     salesMap[item.date] = item.sales;
+    // 最小・最大日付を記録
+    if (!minDate || item.date < minDate) minDate = item.date;
+    if (!maxDate || item.date > maxDate) maxDate = item.date;
   });
   
   // デバッグ用：どの日付のデータがあるか確認
   console.log(`Row ${row} - Available dates:`, Object.keys(salesMap).sort());
+  console.log(`Row ${row} - Period: ${minDate} to ${maxDate}`);
   
   // ヘッダー行から日付を読み取り、対応する売上を設定
   let col = startCol + 1; // P列から開始（O列は年合計なのでスキップ）
@@ -272,9 +280,16 @@ function updateSalesData(sheet, row, salesData) {
       }
       
       if (isDateHeader) {
-        // APIから取得したデータがある場合はその値を、ない場合は0を設定
-        const value = salesMap.hasOwnProperty(dateKey) ? salesMap[dateKey] : 0;
-        sheet.getRange(row, col).setValue(value);
+        // 日付がAPIの取得期間内かチェック
+        if (minDate && maxDate && dateKey >= minDate && dateKey <= maxDate) {
+          // 期間内の場合：データがあればその値を、なければ0を設定
+          const value = salesMap.hasOwnProperty(dateKey) ? salesMap[dateKey] : 0;
+          sheet.getRange(row, col).setValue(value);
+        } else if (salesMap.hasOwnProperty(dateKey)) {
+          // 期間外でもデータがある場合は設定（念のため）
+          sheet.getRange(row, col).setValue(salesMap[dateKey]);
+        }
+        // それ以外（期間外でデータなし）は何もしない（空欄のまま）
       }
       col++;
     }
