@@ -91,7 +91,8 @@ function updateSalesSheet() {
       // 売上データを保存
       cache[sid][displayName] = (r.daily_sales || []).map(d => ({
         date: d.date,
-        sales: d.total_sales || 0
+        sales: d.total_sales || 0,
+        reservations: d.reservations || []
       }));
     });
     
@@ -221,9 +222,13 @@ function fixDateHeaders() {
 /**
  * 売上データを更新する関数（期間考慮版）
  * APIの取得期間内のみ0円表示、期間外は空欄
+ * N列のチェックボックスがTRUEの場合、朝6時〜11時の予約を除外
  */
 function updateSalesData(sheet, row, salesData) {
   const startCol = 15; // O列から開始
+  
+  // N列（14列）のチェックボックスの状態を確認
+  const excludeMorning = sheet.getRange(row, 14).getValue() === true;
   
   // 売上データを日付→売上のマップに変換
   const salesMap = {};
@@ -231,7 +236,21 @@ function updateSalesData(sheet, row, salesData) {
   let maxDate = null;
   
   salesData.forEach(item => {
-    salesMap[item.date] = item.sales;
+    let totalSales = item.sales || 0;
+    
+    // チェックボックスがTRUEの場合、朝6時〜11時の予約を除外
+    if (excludeMorning && item.reservations && item.reservations.length > 0) {
+      totalSales = 0;
+      item.reservations.forEach(reservation => {
+        const startTime = reservation.start_time;
+        // 開始時間が6:00以降かつ11:00より前の場合は除外
+        if (!isInMorningRange(startTime)) {
+          totalSales += reservation.price || 0;
+        }
+      });
+    }
+    
+    salesMap[item.date] = totalSales;
     // 最小・最大日付を記録
     if (!minDate || item.date < minDate) minDate = item.date;
     if (!maxDate || item.date > maxDate) maxDate = item.date;
@@ -240,6 +259,7 @@ function updateSalesData(sheet, row, salesData) {
   // デバッグ用：どの日付のデータがあるか確認
   console.log(`Row ${row} - Available dates:`, Object.keys(salesMap).sort());
   console.log(`Row ${row} - Period: ${minDate} to ${maxDate}`);
+  console.log(`Row ${row} - Exclude morning: ${excludeMorning}`);
   
   // ヘッダー行から日付を読み取り、対応する売上を設定
   let col = startCol + 1; // P列から開始（O列は年合計なのでスキップ）
@@ -294,6 +314,21 @@ function updateSalesData(sheet, row, salesData) {
       col++;
     }
   }
+}
+
+/**
+ * 時刻が朝6時〜11時の範囲内かを判定する関数
+ * @param {string} timeStr - "HH:MM"形式の時刻文字列
+ * @return {boolean} - 6:00〜10:59の範囲内ならtrue
+ */
+function isInMorningRange(timeStr) {
+  if (!timeStr || typeof timeStr !== 'string') return false;
+  
+  const [hours, minutes] = timeStr.split(':').map(Number);
+  const timeInMinutes = hours * 60 + minutes;
+  
+  // 6:00は360分、11:00は660分
+  return timeInMinutes >= 360 && timeInMinutes < 660;
 }
 
 /**
