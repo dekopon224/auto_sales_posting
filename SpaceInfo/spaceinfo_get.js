@@ -147,6 +147,9 @@ function writeRoomDataToSheet(sheet, rooms, originalRoomIds) {
       return;
     }
     
+    // B列に施設名を書き込む
+    sheet.getRange(row, 2).setValue(room.name || '');         // B列: name（施設名）
+    
     // D列〜I列に基本情報を書き込む
     sheet.getRange(row, 4).setValue(room.location || '');     // D列: location
     sheet.getRange(row, 5).setValue(room.station || '');      // E列: station
@@ -204,6 +207,9 @@ function formatDateHeader(dateStr) {
  * @param {number} row - 行番号
  */
 function clearRoomInfoInRow(sheet, row) {
+  // B列をクリア（施設名）
+  sheet.getRange(row, 2).clearContent();
+  
   // D列〜I列をクリア（基本情報）
   sheet.getRange(row, 4, 1, 6).clearContent();
   
