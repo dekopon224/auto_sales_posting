@@ -21,7 +21,7 @@ def extract_room_id_from_soup(soup):
         print(f"room_id取得エラー: {e}")
         return None
 
-def process_single_url(url, now):
+def process_single_url(url, now, page=None):
     """単一URLの処理"""
     result = {
         "url": url,
@@ -120,7 +120,7 @@ def process_single_url(url, now):
         # ===== 追加ここまで =====
 
         # Playwrightを使用してポイント情報を取得
-        points_data = get_points_data(url)
+        points_data = get_points_data(url, page)
 
         # 1週間分のデータを生成
         for i in range(7):
@@ -169,50 +169,13 @@ def lambda_handler(event, context):
     
     results = []
     
-    for record in event['Records']:
-        try:
-            # SQSメッセージからデータを取得
-            message_body = json.loads(record['body'])
-            urls = message_body.get('urls', [])
-            
-            print(f"処理開始: {len(urls)}件のURL")
-            
-            # 各URLを処理
-            for url in urls:
-                print(f"処理中: {url}")
-                result = process_single_url(url, now)
-                results.append(result)
-            
-            # 結果をログに出力
-            total_success = sum(1 for r in results if r["success"])
-            total_errors = sum(1 for r in results if not r["success"])
-            successful_spaces = [r["space_name"] for r in results if r["success"] and r["space_name"]]
-            
-            print(f"処理完了: {total_success}件成功, {total_errors}件エラー")
-            print(f"成功したスペース: {', '.join(successful_spaces)}")
-            
-        except Exception as e:
-            print(f"メッセージ処理エラー: {e}")
-    
-    return {
-        'statusCode': 200,
-        'body': json.dumps({
-            'processed_messages': len(event['Records']),
-            'processed_urls': len(results),
-            'successful_urls': sum(1 for r in results if r["success"])
-        })
-    }
-
-def get_points_data(url):
-    """Playwrightを使用してポイント情報を取得する関数"""
-    print(f"URLにアクセス中: {url}")
-    
+    # ブラウザを一度だけ作成して全URLで共有
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
             args=[
                 "--single-process",
-                "--no-zygote",
+                "--no-zygote", 
                 "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
@@ -226,20 +189,92 @@ def get_points_data(url):
         page = context.new_page()
         
         try:
-            response = page.goto(url, wait_until='networkidle', timeout=90000)
-            
-            if not response.ok:
-                print(f"ページロードエラー: {response.status} {response.status_text}")
-                return []
-            
+            for record in event['Records']:
+                try:
+                    # SQSメッセージからデータを取得
+                    message_body = json.loads(record['body'])
+                    urls = message_body.get('urls', [])
+                    
+                    print(f"処理開始: {len(urls)}件のURL")
+                    
+                    # 各URLを処理
+                    for url in urls:
+                        print(f"処理中: {url}")
+                        result = process_single_url(url, now, page)
+                        results.append(result)
+                    
+                    # 結果をログに出力
+                    total_success = sum(1 for r in results if r["success"])
+                    total_errors = sum(1 for r in results if not r["success"])
+                    successful_spaces = [r["space_name"] for r in results if r["success"] and r["space_name"]]
+                    
+                    print(f"処理完了: {total_success}件成功, {total_errors}件エラー")
+                    print(f"成功したスペース: {', '.join(successful_spaces)}")
+                    
+                except Exception as e:
+                    print(f"メッセージ処理エラー: {e}")
+        finally:
+            browser.close()
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'processed_messages': len(event['Records']),
+            'processed_urls': len(results),
+            'successful_urls': sum(1 for r in results if r["success"])
+        })
+    }
+
+def get_points_data(url, page=None, should_close_browser=False):
+    """Playwrightを使用してポイント情報を取得する関数"""
+    print(f"URLにアクセス中: {url}")
+    
+    # ページが渡されない場合は新しいブラウザを作成
+    if page is None:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--single-process",
+                    "--no-zygote",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--headless=new",
+                    "--disable-http2",
+                ]
+            )
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+            should_close_browser = True
+    
+    try:
+        # リトライ機能付きでページを読み込み
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                page.wait_for_selector('.css-j3mvlq', timeout=10000)
+                response = page.goto(url, wait_until='networkidle', timeout=30000)
+                break
             except Exception as e:
-                print(f"要素 '.css-j3mvlq' が見つかりませんでした: {str(e)}")
-                return []
-            
-            # データを抽出し、記号をポイントに変換
-            data = page.evaluate('''() => {
+                if attempt == max_retries - 1:
+                    raise e
+                print(f"ページ読み込み失敗 (試行 {attempt + 1}/{max_retries}): {str(e)}")
+                time.sleep(2)
+        
+        if not response.ok:
+            print(f"ページロードエラー: {response.status} {response.status_text}")
+            return []
+        
+        try:
+            page.wait_for_selector('.css-j3mvlq', timeout=10000)
+        except Exception as e:
+            print(f"要素 '.css-j3mvlq' が見つかりませんでした: {str(e)}")
+            return []
+        
+        # データを抽出し、記号をポイントに変換
+        data = page.evaluate('''() => {
                 const buttons = document.querySelectorAll('.css-j3mvlq button');
                 if (!buttons || buttons.length === 0) {
                     return [];
@@ -263,33 +298,34 @@ def get_points_data(url):
                     return { day, date, point };
                 });
             }''')
-            
-            if not data or len(data) == 0:
-                print("指定した要素から日付と記号を取得できませんでした。")
-                return []
-            
-            # 日付フォーマットを整形 (例: "5/14" -> "2025-05-14")
-            formatted_data = []
-            current_year = datetime.now().year
-            for item in data:
-                if item['date']:
-                    try:
-                        month, day = item['date'].split('/')
-                        formatted_date = f"{current_year}-{month.zfill(2)}-{day.zfill(2)}"
-                        formatted_data.append({
-                            'day': item['day'],
-                            'date': formatted_date,
-                            'point': item['point']
-                        })
-                    except Exception as e:
-                        print(f"日付フォーマットエラー: {str(e)} - {item['date']}")
-            
-            return formatted_data
-            
-        except Exception as e:
-            print(f"スクレイピング中にエラーが発生しました: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
+        
+        if not data or len(data) == 0:
+            print("指定した要素から日付と記号を取得できませんでした。")
             return []
-        finally:
+        
+        # 日付フォーマットを整形 (例: "5/14" -> "2025-05-14")
+        formatted_data = []
+        current_year = datetime.now().year
+        for item in data:
+            if item['date']:
+                try:
+                    month, day = item['date'].split('/')
+                    formatted_date = f"{current_year}-{month.zfill(2)}-{day.zfill(2)}"
+                    formatted_data.append({
+                        'day': item['day'],
+                        'date': formatted_date,
+                        'point': item['point']
+                    })
+                except Exception as e:
+                    print(f"日付フォーマットエラー: {str(e)} - {item['date']}")
+            
+        return formatted_data
+        
+    except Exception as e:
+        print(f"スクレイピング中にエラーが発生しました: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return []
+    finally:
+        if should_close_browser and 'browser' in locals():
             browser.close()
