@@ -67,6 +67,12 @@ def get_options_from_url(url):
         return [], "不明", None
 
 def extract_space_name(soup):
+    # h1タグのclass="css-cftpp3"から施設名を取得
+    h1_tag = soup.find("h1", class_="css-cftpp3")
+    if h1_tag:
+        return h1_tag.text.strip()
+    
+    # h1タグが見つからない場合は、titleタグにフォールバック
     title_tag = soup.find("title")
     return title_tag.text.strip() if title_tag else "不明"
 
