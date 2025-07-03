@@ -130,21 +130,17 @@ function writeDataToSheet(sheet, spaces, originalSpaceIds) {
     spaceMap[space.spaceId] = space;
   });
   
-  // 各行に対してスペース名とオプション情報を書き込む
+  // 各行に対してオプション情報を書き込む
   originalSpaceIds.forEach((spaceId, index) => {
     const row = index + 2; // 2行目から開始
     const space = spaceMap[spaceId];
     
     if (!space || space.error) {
       // エラーまたはデータなしの場合
-      sheet.getRange(row, 2).clearContent(); // B列をクリア
       clearOptionsInRow(sheet, row); // オプション列をクリア
       console.log(`spaceId ${spaceId}: データなしまたはエラー`);
       return;
     }
-    
-    // B列にスペース名を書き込む
-    sheet.getRange(row, 2).setValue(space.name || '');
     
     // オプション情報を書き込む（履歴付き）
     writeOptionsWithHistoryInRow(sheet, row, space.options || [], space.priceHistory || []);
