@@ -1,4 +1,14 @@
 /**
+ * スプレッドシートのメニューに「平均単価取得」を追加する
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('単価/売上ツール')
+    .addItem('平均単価取得', 'fetchAveragePriceAndWriteToSheet')
+    .addToUi();
+}
+
+/**
  * GAS から Lambda API をトリガーし、複数スペースの3つの異なる日時別単価を
  * シート "売上/単価" に出力する関数。
  * かつ、リクエスト JSON をログに出力するようにしています。
