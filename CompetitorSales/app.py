@@ -112,6 +112,15 @@ def write_to_dynamodb(url, data):
 
     JST = timezone(timedelta(hours=9))
     now_jst = datetime.now(JST)
+    
+    # 現在時刻が0時以降か12時以降かを判定
+    current_hour = now_jst.hour
+    if current_hour < 12:
+        # 0時以降12時未満の場合、0時以降の時間帯のみ処理
+        time_threshold = now_jst.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        # 12時以降の場合、12時以降の時間帯のみ処理
+        time_threshold = now_jst.replace(hour=12, minute=0, second=0, microsecond=0)
 
     for plan in data['plans']:
         disp_name = plan['name']
@@ -124,12 +133,23 @@ def write_to_dynamodb(url, data):
             reservation_date = f"{year}-{m:02d}-{d:02d}"
 
             for slot in ranges:
-                sk = f"{plan_id}#{reservation_date}#{slot['start_time']}"
-
                 start_hour, start_minute = map(int, slot['start_time'].split(':'))
                 end_hour, end_minute = map(int, slot['end_time'].split(':'))
                 if end_hour < start_hour:
                     end_hour += 24
+                
+                # 予約時間がtime_thresholdより前の場合はスキップ（過去時間の除外）
+                slot_datetime = datetime.strptime(reservation_date, "%Y-%m-%d").replace(tzinfo=JST)
+                slot_datetime = slot_datetime.replace(hour=start_hour, minute=start_minute)
+                if start_hour >= 24:
+                    slot_datetime += timedelta(days=1)
+                    slot_datetime = slot_datetime.replace(hour=start_hour - 24, minute=start_minute)
+                
+                if slot_datetime < time_threshold:
+                    continue
+                
+                sk = f"{plan_id}#{reservation_date}#{slot['start_time']}"
+
                 start_minutes = start_hour * 60 + start_minute
                 end_minutes = end_hour * 60 + end_minute
                 usage_hours = (end_minutes - start_minutes) / 60
