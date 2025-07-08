@@ -1,10 +1,371 @@
 /**
- * 毎朝実行トリガー用
+ * 毎朝実行トリガー用（バッチ処理版）
  * ・スペースIDを３行おきに取得
- * ・APIコールして結果をキャッシュ
+ * ・50件ずつバッチ処理でAPIコール
  * ・日付ヘッダー＆ドロップダウンをセット
  */
 function updateSalesSheet() {
+  const SHEET_NAME = '単価/売上';
+  
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAME);
+    if (!sh) throw new Error(`シート"${SHEET_NAME}"が見つかりません`);
+
+    // 1) スペースIDと出力先行のリスト作成 (2,5,8,... の行)
+    const groups = [];
+    for (let row = 2; ; row += 3) {
+      const id = sh.getRange(row, 3).getDisplayValue().toString().trim();
+      if (!id) break;
+      groups.push({ spaceId: id, row });
+    }
+    
+    if (groups.length === 0) {
+      console.log('処理対象のスペースIDがありません');
+      return;
+    }
+
+    // 2) 日付ヘッダーの構築（O列から開始）
+    // ヘッダーが既に設定されているかチェック
+    if (sh.getRange(1, 15).getValue() !== '2025年合計') {
+      setupDateHeaders(sh);
+    }
+
+    // 3) バッチ処理開始
+    console.log(`開始: ${groups.length}件のスペースIDをバッチ処理します`);
+    
+    // バッチ処理の状態をリセット
+    const properties = PropertiesService.getScriptProperties();
+    properties.setProperty('totalGroups', groups.length.toString());
+    properties.setProperty('currentBatch', '0');
+    properties.setProperty('batchSize', '20');
+    properties.setProperty('processedCount', '0');
+    properties.setProperty('errorCount', '0');
+    
+    // 全グループをCacheServiceに保存（JSON形式）- PropertiesServiceの上限回避
+    const chunkedGroups = [];
+    const BATCH_SIZE = 20; // バッチサイズを20に縮小してキャッシュ制限を回避
+    for (let i = 0; i < groups.length; i += BATCH_SIZE) {
+      chunkedGroups.push(groups.slice(i, i + BATCH_SIZE));
+    }
+    
+    try {
+      CacheService.getScriptCache().put('batchGroupsData', JSON.stringify(chunkedGroups), 6 * 60 * 60);
+      console.log(`バッチデータをキャッシュに保存: ${chunkedGroups.length}バッチ`);
+    } catch (error) {
+      console.error('バッチデータの保存に失敗:', error);
+      throw new Error('データサイズが大きすぎます。バッチサイズを小さくしてください。');
+    }
+    
+    // 初期キャッシュをクリア
+    CacheService.getScriptCache().put('salesCache', '{}', 6 * 60 * 60);
+    
+    // 最初のバッチを実行
+    processBatch();
+    
+  } catch (error) {
+    console.error('updateSalesSheet error:', error);
+    // 必要に応じて管理者に通知
+    // MailApp.sendEmail('admin@example.com', 'GAS Error', error.toString());
+  }
+}
+
+/**
+ * バッチ処理実行関数
+ */
+function processBatch() {
+  const SHEET_NAME = '単価/売上';
+  const API_URL = 'https://a776jppz94.execute-api.ap-northeast-1.amazonaws.com/prod/getcompetitorsales';
+  
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const currentBatch = parseInt(properties.getProperty('currentBatch') || '0');
+    
+    // CacheServiceからバッチデータを取得
+    const groupsDataRaw = CacheService.getScriptCache().get('batchGroupsData');
+    if (!groupsDataRaw) {
+      throw new Error('バッチデータが見つかりません。updateSalesSheetを再実行してください。');
+    }
+    const groupsData = JSON.parse(groupsDataRaw);
+    const totalBatches = groupsData.length;
+    
+    if (currentBatch >= totalBatches) {
+      // 全バッチ処理完了
+      finalizeBatchProcessing();
+      return;
+    }
+    
+    const batchGroups = groupsData[currentBatch];
+    const totalGroups = parseInt(properties.getProperty('totalGroups') || '0');
+    
+    console.log(`バッチ ${currentBatch + 1}/${totalBatches} 処理中 (${batchGroups.length}件)`);
+    
+    // API リクエスト
+    const payload = { queries: batchGroups.map(g => ({ spaceId: g.spaceId })) };
+    const res = UrlFetchApp.fetch(API_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true,
+      timeout: 300000 // 5分に延長
+    });
+    
+    if (res.getResponseCode() !== 200) {
+      throw new Error(`APIエラー(${res.getResponseCode()}): ${res.getContentText()}`);
+    }
+    
+    const data = JSON.parse(res.getContentText());
+    
+    // レスポンスの検証
+    if (!data.results || !Array.isArray(data.results)) {
+      throw new Error('Invalid API response structure');
+    }
+    
+    // 既存キャッシュを取得
+    const existingCacheRaw = CacheService.getScriptCache().get('salesCache') || '{}';
+    const existingCache = JSON.parse(existingCacheRaw);
+    
+    // 新しいデータを既存キャッシュに追加
+    const errorSpaces = [];
+    let processedInBatch = 0;
+    
+    data.results.forEach((r, index) => {
+      // エラーチェック
+      if (r.error) {
+        console.error(`Error for spaceId ${r.spaceId}: ${r.error}`);
+        errorSpaces.push(r.spaceId);
+        return;
+      }
+      
+      const sid = r.spaceId;
+      existingCache[sid] = existingCache[sid] || {};
+      
+      // プラン表示名を安全に取得
+      let displayName = r.planId || 'Unknown';
+      for (const day of r.daily_sales || []) {
+        if (day.reservations && day.reservations.length > 0) {
+          const planName = day.reservations[0].planDisplayName;
+          if (planName) {
+            displayName = planName;
+            break;
+          }
+        }
+      }
+      
+      // 重複チェック
+      if (existingCache[sid][displayName]) {
+        console.warn(`重複プラン検出: ${sid} - ${displayName}`);
+        // プランIDを付加して一意にする
+        displayName = `${displayName} (${r.planId})`;
+      }
+      
+      // 売上データを保存
+      existingCache[sid][displayName] = (r.daily_sales || []).map(d => ({
+        date: d.date,
+        sales: d.total_sales || 0,
+        reservations: d.reservations || []
+      }));
+      
+      processedInBatch++;
+    });
+    
+    // キャッシュ更新（サイズ制限対応）
+    try {
+      CacheService.getScriptCache().put('salesCache', JSON.stringify(existingCache), 6 * 60 * 60);
+    } catch (cacheError) {
+      console.warn('キャッシュサイズ制限により、個別キャッシュに保存します');
+      // 個別キャッシュに保存
+      Object.keys(existingCache).forEach(spaceId => {
+        try {
+          CacheService.getScriptCache().put(`cache_${spaceId}`, JSON.stringify(existingCache[spaceId]), 6 * 60 * 60);
+        } catch (individualError) {
+          console.error(`個別キャッシュ保存失敗: ${spaceId}`, individualError);
+        }
+      });
+      // 使用した個別キャッシュのリストを保存
+      const cacheKeys = Object.keys(existingCache).map(id => `cache_${id}`);
+      CacheService.getScriptCache().put('cacheKeys', JSON.stringify(cacheKeys), 6 * 60 * 60);
+      CacheService.getScriptCache().put('salesCache', '{}', 6 * 60 * 60); // 空のキャッシュをセット
+    }
+    
+    // 進捗更新
+    const totalProcessed = parseInt(properties.getProperty('processedCount') || '0') + processedInBatch;
+    const totalErrors = parseInt(properties.getProperty('errorCount') || '0') + errorSpaces.length;
+    properties.setProperty('processedCount', totalProcessed.toString());
+    properties.setProperty('errorCount', totalErrors.toString());
+    properties.setProperty('currentBatch', (currentBatch + 1).toString());
+    
+    console.log(`バッチ ${currentBatch + 1} 完了: 処理済み${totalProcessed}/${totalGroups}, エラー${totalErrors}件`);
+    
+    // 次のバッチを30秒後に実行
+    if (currentBatch + 1 < totalBatches) {
+      ScriptApp.newTrigger('processBatch')
+        .timeBased()
+        .after(30 * 1000) // 30秒後
+        .create();
+    } else {
+      // 最後のバッチが完了したら最終処理
+      finalizeBatchProcessing();
+    }
+    
+  } catch (error) {
+    console.error('processBatch error:', error);
+    // エラーが発生した場合も次のバッチを試行
+    const properties = PropertiesService.getScriptProperties();
+    const currentBatch = parseInt(properties.getProperty('currentBatch') || '0');
+    
+    // CacheServiceからバッチデータを取得してtotalBatchesを計算
+    const groupsDataRaw = CacheService.getScriptCache().get('batchGroupsData');
+    const totalBatches = groupsDataRaw ? JSON.parse(groupsDataRaw).length : 0;
+    
+    if (currentBatch + 1 < totalBatches) {
+      properties.setProperty('currentBatch', (currentBatch + 1).toString());
+      ScriptApp.newTrigger('processBatch')
+        .timeBased()
+        .after(60 * 1000) // エラー時は1分後
+        .create();
+    } else {
+      finalizeBatchProcessing();
+    }
+  }
+}
+
+/**
+ * バッチ処理完了時の最終処理
+ */
+function finalizeBatchProcessing() {
+  const SHEET_NAME = '単価/売上';
+  
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAME);
+    const properties = PropertiesService.getScriptProperties();
+    
+    // 統計情報取得
+    const totalGroups = parseInt(properties.getProperty('totalGroups') || '0');
+    const processedCount = parseInt(properties.getProperty('processedCount') || '0');
+    const errorCount = parseInt(properties.getProperty('errorCount') || '0');
+    
+    // 全グループデータを取得
+    const groupsDataRaw = CacheService.getScriptCache().get('batchGroupsData');
+    if (!groupsDataRaw) {
+      throw new Error('バッチデータが見つかりません。');
+    }
+    const groupsData = JSON.parse(groupsDataRaw);
+    const allGroups = groupsData.flat();
+    
+    // キャッシュからデータを取得（個別キャッシュ対応）
+    let cache = {};
+    try {
+      const cacheRaw = CacheService.getScriptCache().get('salesCache') || '{}';
+      cache = JSON.parse(cacheRaw);
+      
+      // 個別キャッシュがある場合は統合
+      const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
+      if (cacheKeysRaw) {
+        const cacheKeys = JSON.parse(cacheKeysRaw);
+        cacheKeys.forEach(key => {
+          const spaceId = key.replace('cache_', '');
+          const individualCacheRaw = CacheService.getScriptCache().get(key);
+          if (individualCacheRaw) {
+            cache[spaceId] = JSON.parse(individualCacheRaw);
+          }
+        });
+      }
+    } catch (error) {
+      console.error('キャッシュ取得エラー:', error);
+      cache = {};
+    }
+    
+    console.log('最終処理開始: ドロップダウン設定と売上データ更新');
+    
+    // 各グループのドロップダウン設定＋売上更新
+    allGroups.forEach(({ spaceId, row }) => {
+      const plans = Object.keys(cache[spaceId] || {});
+      const rng = sh.getRange(row, 4, 3, 1);  // D列を3行まとめて
+      
+      // マージ状態のチェック
+      if (!rng.isPartOfMerge()) {
+        rng.merge();
+      }
+      
+      // データバリデーションをクリア
+      rng.clearDataValidations();
+      
+      // エラーがあったスペースの場合
+      if (!cache[spaceId] || Object.keys(cache[spaceId]).length === 0) {
+        sh.getRange(row, 4).setValue('エラー');
+        // 年合計・月合計のセルに数式を設定
+        setTotalFormulas(sh, row);
+        return;
+      }
+
+      // バリデーション再設定
+      if (plans.length > 0) {
+        const rule = SpreadsheetApp.newDataValidation()
+          .requireValueInList(plans, true)
+          .setAllowInvalid(false)
+          .build();
+        rng.setDataValidation(rule);
+        
+        // デフォルトで最初のプランを選択（未選択の場合）
+        const currentValue = sh.getRange(row, 4).getValue().toString().trim();
+        if (!currentValue) {
+          sh.getRange(row, 4).setValue(plans[0]);
+        }
+      }
+
+      // 選択されているプランの売上を表示
+      const selectedPlan = sh.getRange(row, 4).getValue().toString().trim();
+      if (selectedPlan && cache[spaceId] && cache[spaceId][selectedPlan]) {
+        updateSalesData(sh, row, cache[spaceId][selectedPlan]);
+      }
+      
+      // 年合計・月合計の数式を設定
+      setTotalFormulas(sh, row);
+    });
+    
+    // 完了メッセージ
+    console.log(`全バッチ処理完了: 総数${totalGroups}件, 処理済み${processedCount}件, エラー${errorCount}件`);
+    
+    // 状態をクリア
+    properties.deleteProperty('currentBatch');
+    properties.deleteProperty('totalGroups');
+    properties.deleteProperty('processedCount');
+    properties.deleteProperty('errorCount');
+    properties.deleteProperty('batchSize');
+    
+    // キャッシュもクリア
+    CacheService.getScriptCache().remove('batchGroupsData');
+    
+    // 個別キャッシュもクリア
+    const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
+    if (cacheKeysRaw) {
+      const cacheKeys = JSON.parse(cacheKeysRaw);
+      cacheKeys.forEach(key => {
+        CacheService.getScriptCache().remove(key);
+      });
+      CacheService.getScriptCache().remove('cacheKeys');
+    }
+    
+    // 不要なトリガーを削除
+    const triggers = ScriptApp.getProjectTriggers();
+    triggers.forEach(trigger => {
+      if (trigger.getHandlerFunction() === 'processBatch') {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+    
+  } catch (error) {
+    console.error('finalizeBatchProcessing error:', error);
+  }
+}
+
+/**
+ * 旧バージョン（互換性維持用）
+ * 少数のIDの場合はこちらを使用
+ */
+function updateSalesSheetLegacy() {
   const SHEET_NAME = '単価/売上';
   const API_URL = 'https://a776jppz94.execute-api.ap-northeast-1.amazonaws.com/prod/getcompetitorsales';
   
@@ -149,7 +510,7 @@ function updateSalesSheet() {
     console.log(`更新完了: ${groups.length}件のスペース, エラー: ${errorSpaces.length}件`);
     
   } catch (error) {
-    console.error('updateSalesSheet error:', error);
+    console.error('updateSalesSheetLegacy error:', error);
     // 必要に応じて管理者に通知
     // MailApp.sendEmail('admin@example.com', 'GAS Error', error.toString());
   }
@@ -431,7 +792,8 @@ function onEdit(e) {
   if (!planName || planName === 'エラー') return;
 
   try {
-    // キャッシュから読み出し
+    // キャッシュから読み出し（個別キャッシュ対応）
+    let cache = {};
     const cacheRaw = CacheService.getScriptCache().get('salesCache');
     
     if (!cacheRaw) {
@@ -439,7 +801,20 @@ function onEdit(e) {
       return;
     }
     
-    const cache = JSON.parse(cacheRaw);
+    cache = JSON.parse(cacheRaw);
+    
+    // 個別キャッシュがある場合は統合
+    const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
+    if (cacheKeysRaw) {
+      const cacheKeys = JSON.parse(cacheKeysRaw);
+      cacheKeys.forEach(key => {
+        const spaceId = key.replace('cache_', '');
+        const individualCacheRaw = CacheService.getScriptCache().get(key);
+        if (individualCacheRaw) {
+          cache[spaceId] = JSON.parse(individualCacheRaw);
+        }
+      });
+    }
     
     const spaceId = sheet.getRange(row, 3).getDisplayValue().toString().trim();
     const salesArr = (cache[spaceId] && cache[spaceId][planName]) || [];
@@ -453,6 +828,105 @@ function onEdit(e) {
   } catch (error) {
     console.error('onEdit error:', error);
   }
+}
+
+/**
+ * バッチ処理の進捗確認関数
+ */
+function checkBatchProgress() {
+  const properties = PropertiesService.getScriptProperties();
+  const totalGroups = parseInt(properties.getProperty('totalGroups') || '0');
+  const currentBatch = parseInt(properties.getProperty('currentBatch') || '0');
+  const processedCount = parseInt(properties.getProperty('processedCount') || '0');
+  const errorCount = parseInt(properties.getProperty('errorCount') || '0');
+  const batchSize = parseInt(properties.getProperty('batchSize') || '20');
+  
+  if (totalGroups === 0) {
+    console.log('バッチ処理は実行されていません');
+    return;
+  }
+  
+  const totalBatches = Math.ceil(totalGroups / batchSize);
+  const progress = Math.round((processedCount / totalGroups) * 100);
+  
+  console.log(`バッチ処理進捗:
+  - 総数: ${totalGroups}件
+  - 処理済み: ${processedCount}件 (${progress}%)
+  - エラー: ${errorCount}件
+  - 現在のバッチ: ${currentBatch}/${totalBatches}
+  - バッチサイズ: ${batchSize}件`);
+  
+  if (currentBatch >= totalBatches) {
+    console.log('バッチ処理は完了しています');
+  } else {
+    console.log('バッチ処理は実行中です');
+  }
+}
+
+/**
+ * バッチ処理を強制停止する関数
+ */
+function stopBatchProcessing() {
+  const properties = PropertiesService.getScriptProperties();
+  
+  // 状態をクリア
+  properties.deleteProperty('currentBatch');
+  properties.deleteProperty('totalGroups');
+  properties.deleteProperty('processedCount');
+  properties.deleteProperty('errorCount');
+  properties.deleteProperty('batchSize');
+  
+  // キャッシュもクリア
+  CacheService.getScriptCache().remove('batchGroupsData');
+  
+  // 個別キャッシュもクリア
+  const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
+  if (cacheKeysRaw) {
+    const cacheKeys = JSON.parse(cacheKeysRaw);
+    cacheKeys.forEach(key => {
+      CacheService.getScriptCache().remove(key);
+    });
+    CacheService.getScriptCache().remove('cacheKeys');
+  }
+  
+  // processBatchトリガーを削除
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'processBatch') {
+      ScriptApp.deleteTrigger(trigger);
+      console.log('processBatchトリガーを削除しました');
+    }
+  });
+  
+  console.log('バッチ処理を強制停止しました');
+}
+
+/**
+ * バッチ処理を再開する関数（エラー時の復旧用）
+ */
+function resumeBatchProcessing() {
+  const properties = PropertiesService.getScriptProperties();
+  const currentBatch = parseInt(properties.getProperty('currentBatch') || '0');
+  
+  // CacheServiceからバッチデータを取得
+  const groupsDataRaw = CacheService.getScriptCache().get('batchGroupsData');
+  if (!groupsDataRaw) {
+    console.log('再開可能なバッチ処理が見つかりません');
+    return;
+  }
+  
+  const groupsData = JSON.parse(groupsDataRaw);
+  
+  if (currentBatch >= groupsData.length) {
+    console.log('すべてのバッチが完了済みです');
+    finalizeBatchProcessing();
+    return;
+  }
+  
+  console.log(`バッチ処理を再開します (バッチ ${currentBatch + 1}/${groupsData.length})`);
+  
+  // processBatchを即座に実行
+  processBatch();
 }
 
 // 初回セットアップ用（手動実行）
