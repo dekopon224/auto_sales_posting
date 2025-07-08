@@ -1,14 +1,17 @@
 /**
  * 毎朝実行トリガー用（バッチ処理版）
  * ・スペースIDを３行おきに取得
- * ・50件ずつバッチ処理でAPIコール
+ * ・20件ずつバッチ処理でAPIコール
  * ・日付ヘッダー＆ドロップダウンをセット
  */
+
+const SPREADSHEET_ID = '1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo';
+
 function updateSalesSheet() {
   const SHEET_NAME = '単価/売上';
   
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const sh = ss.getSheetByName(SHEET_NAME);
     if (!sh) throw new Error(`シート"${SHEET_NAME}"が見つかりません`);
 
@@ -44,7 +47,7 @@ function updateSalesSheet() {
     
     // 全グループをCacheServiceに保存（JSON形式）- PropertiesServiceの上限回避
     const chunkedGroups = [];
-    const BATCH_SIZE = 20; // バッチサイズを20に縮小してキャッシュ制限を回避
+    const BATCH_SIZE = 50; // バッチサイズを20に縮小してキャッシュ制限を回避
     for (let i = 0; i < groups.length; i += BATCH_SIZE) {
       chunkedGroups.push(groups.slice(i, i + BATCH_SIZE));
     }
@@ -127,7 +130,7 @@ function processBatch() {
     
     // 新しいデータを既存キャッシュに追加
     const errorSpaces = [];
-    let processedInBatch = 0;
+    const processedSpaceIds = new Set(); // ★修正点①：ユニークなスペースIDをカウントするためにSetを準備
     
     data.results.forEach((r, index) => {
       // エラーチェック
@@ -138,6 +141,7 @@ function processBatch() {
       }
       
       const sid = r.spaceId;
+      processedSpaceIds.add(sid); // ★修正点①：処理したスペースIDをSetに追加
       existingCache[sid] = existingCache[sid] || {};
       
       // プラン表示名を安全に取得
@@ -165,8 +169,6 @@ function processBatch() {
         sales: d.total_sales || 0,
         reservations: d.reservations || []
       }));
-      
-      processedInBatch++;
     });
     
     // キャッシュ更新（サイズ制限対応）
@@ -189,6 +191,7 @@ function processBatch() {
     }
     
     // 進捗更新
+    const processedInBatch = processedSpaceIds.size; // ★修正点①：ユニークなスペースIDの数を取得
     const totalProcessed = parseInt(properties.getProperty('processedCount') || '0') + processedInBatch;
     const totalErrors = parseInt(properties.getProperty('errorCount') || '0') + errorSpaces.length;
     properties.setProperty('processedCount', totalProcessed.toString());
@@ -237,7 +240,7 @@ function finalizeBatchProcessing() {
   const SHEET_NAME = '単価/売上';
   
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const sh = ss.getSheetByName(SHEET_NAME);
     const properties = PropertiesService.getScriptProperties();
     
@@ -337,6 +340,7 @@ function finalizeBatchProcessing() {
     
     // キャッシュもクリア
     CacheService.getScriptCache().remove('batchGroupsData');
+    CacheService.getScriptCache().remove('salesCache');
     
     // 個別キャッシュもクリア
     const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
@@ -370,7 +374,7 @@ function updateSalesSheetLegacy() {
   const API_URL = 'https://a776jppz94.execute-api.ap-northeast-1.amazonaws.com/prod/getcompetitorsales';
   
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const sh = ss.getSheetByName(SHEET_NAME);
     if (!sh) throw new Error(`シート"${SHEET_NAME}"が見つかりません`);
 
@@ -547,7 +551,7 @@ function setupDateHeaders(sheet) {
     for (let day = startDay; day <= daysInMonth; day++) {
       const dateStr = `2025/${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}`;
       // 明示的に文字列として設定
-      sheet.getRange(1, col).setValue(dateStr.toString());
+      sheet.getRange(1, col).setValue(dateStr);
       col++;
     }
   }
@@ -559,7 +563,7 @@ function setupDateHeaders(sheet) {
  */
 function fixDateHeaders() {
   const SHEET_NAME = '単価/売上';
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sh = ss.getSheetByName(SHEET_NAME);
   
   const startCol = 15; // O列
@@ -617,64 +621,39 @@ function updateSalesData(sheet, row, salesData) {
     if (!maxDate || item.date > maxDate) maxDate = item.date;
   });
   
-  // デバッグ用：どの日付のデータがあるか確認
-  console.log(`Row ${row} - Available dates:`, Object.keys(salesMap).sort());
-  console.log(`Row ${row} - Period: ${minDate} to ${maxDate}`);
-  console.log(`Row ${row} - Exclude morning: ${excludeMorning}`);
-  
   // ヘッダー行から日付を読み取り、対応する売上を設定
-  let col = startCol + 1; // P列から開始（O列は年合計なのでスキップ）
-  
-  for (let month = 6; month <= 12; month++) {
-    // 月合計列は既にcolが指している
-    const monthTotalCol = col;
-    col++; // 月合計列をスキップして、その月の最初の日付列へ
-    
-    const daysInMonth = new Date(2025, month, 0).getDate();
-    const startDay = (month === 6) ? 11 : 1; // 6月は11日から開始
-    
-    for (let day = startDay; day <= daysInMonth; day++) {
-      const dateKey = `2025-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const header = sheet.getRange(1, col).getValue();
-      
-      // ヘッダーが日付かどうかを判定（日付オブジェクトまたは日付文字列）
-      let isDateHeader = false;
-      
-      if (header) {
-        // 日付オブジェクトの場合
-        if (header instanceof Date) {
-          isDateHeader = true;
-        }
-        // 文字列で日付形式の場合（YYYY/MM/DD）
-        else if (typeof header === 'string' && header.match(/^\d{4}\/\d{2}\/\d{2}$/)) {
-          isDateHeader = true;
-        }
-        // 日付オブジェクトのtoString()形式の場合
-        else if (header.toString().includes('GMT')) {
-          isDateHeader = true;
-        }
-      }
-      
-      // デバッグ用：ヘッダーと日付キーの対応を確認
-      if (month === 7 && day >= 6 && day <= 10) {
-        console.log(`Col ${col}, DateKey: ${dateKey}, Has data: ${salesMap.hasOwnProperty(dateKey)}, IsDateHeader: ${isDateHeader}`);
-      }
-      
-      if (isDateHeader) {
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, startCol, 1, lastCol - startCol + 1).getValues()[0];
+  const values = [];
+
+  for (let i = 0; i < headers.length; i++) {
+    const col = startCol + i;
+    const header = headers[i];
+    let value = ''; // デフォルトは空欄
+
+    if (header instanceof Date || (typeof header === 'string' && header.match(/^\d{4}\/\d{2}\/\d{2}$/))) {
+        // ★修正点②：ヘッダーの日付形式をAPIの形式(YYYY-MM-DD)に変換
+        const headerDate = new Date(header);
+        const year = headerDate.getFullYear();
+        const month = String(headerDate.getMonth() + 1).padStart(2, '0');
+        const day = String(headerDate.getDate()).padStart(2, '0');
+        const headerDateKey = `${year}-${month}-${day}`;
+
         // 日付がAPIの取得期間内かチェック
-        if (minDate && maxDate && dateKey >= minDate && dateKey <= maxDate) {
-          // 期間内の場合：データがあればその値を、なければ0を設定
-          const value = salesMap.hasOwnProperty(dateKey) ? salesMap[dateKey] : 0;
-          sheet.getRange(row, col).setValue(value);
-        } else if (salesMap.hasOwnProperty(dateKey)) {
-          // 期間外でもデータがある場合は設定（念のため）
-          sheet.getRange(row, col).setValue(salesMap[dateKey]);
+        if (minDate && maxDate && headerDateKey >= minDate && headerDateKey <= maxDate) {
+            // 期間内の場合：データがあればその値を、なければ0を設定
+            value = salesMap.hasOwnProperty(headerDateKey) ? salesMap[headerDateKey] : 0;
+        } else if (salesMap.hasOwnProperty(headerDateKey)) {
+            // 期間外でもデータがある場合は設定（念のため）
+            value = salesMap[headerDateKey];
         }
-        // それ以外（期間外でデータなし）は何もしない（空欄のまま）
-      }
-      col++;
     }
+    // 日付以外のヘッダー（合計列など）は数式で更新されるため、ここでは何もしない
+    values.push(value);
   }
+  
+  // 日付データのみ一括で書き込み
+  sheet.getRange(row, startCol, 1, values.length).setValues([values]);
 }
 
 /**
@@ -780,54 +759,40 @@ function columnToLetter(column) {
  */
 function onEdit(e) {
   if (!e) return;
-  
   const sheet = e.range.getSheet();
   if (sheet.getName() !== '単価/売上') return;
 
-  const col = e.range.getColumn(), row = e.range.getRow();
-  // D列 (4) の 2,5,8…行のみを対象
+  const col = e.range.getColumn();
+  const row = e.range.getRow();
+  // D列(4) かつ、2,5,8...行のみ対象
   if (col !== 4 || (row - 2) % 3 !== 0) return;
 
+  const spaceId  = sheet.getRange(row, 3).getDisplayValue().trim();
   const planName = e.range.getValue();
   if (!planName || planName === 'エラー') return;
 
-  try {
-    // キャッシュから読み出し（個別キャッシュ対応）
-    let cache = {};
-    const cacheRaw = CacheService.getScriptCache().get('salesCache');
-    
-    if (!cacheRaw) {
-      console.error('キャッシュが見つかりません。updateSalesSheetを実行してください。');
-      return;
+  // 1) まずはメインキャッシュから
+  let salesArr = [];
+  const mainRaw = CacheService.getScriptCache().get('salesCache');
+  if (mainRaw) {
+    const main = JSON.parse(mainRaw);
+    if (main[spaceId]) {
+      salesArr = main[spaceId][planName] || [];
     }
-    
-    cache = JSON.parse(cacheRaw);
-    
-    // 個別キャッシュがある場合は統合
-    const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
-    if (cacheKeysRaw) {
-      const cacheKeys = JSON.parse(cacheKeysRaw);
-      cacheKeys.forEach(key => {
-        const spaceId = key.replace('cache_', '');
-        const individualCacheRaw = CacheService.getScriptCache().get(key);
-        if (individualCacheRaw) {
-          cache[spaceId] = JSON.parse(individualCacheRaw);
-        }
-      });
-    }
-    
-    const spaceId = sheet.getRange(row, 3).getDisplayValue().toString().trim();
-    const salesArr = (cache[spaceId] && cache[spaceId][planName]) || [];
-
-    // 売上データを更新
-    updateSalesData(sheet, row, salesArr);
-    
-    // 年合計・月合計の数式を設定（念のため）
-    setTotalFormulas(sheet, row);
-    
-  } catch (error) {
-    console.error('onEdit error:', error);
   }
+
+  // 2) メインキャッシュに なければ、個別キャッシュのみ取りに行く
+  if (salesArr.length===0) {
+    const indivRaw = CacheService.getScriptCache().get(`cache_${spaceId}`);
+    if (indivRaw) {
+      const indiv = JSON.parse(indivRaw);
+      salesArr = indiv[planName] || [];
+    }
+  }
+
+  // 3) ここで salesArr だけ渡せばOK
+  updateSalesData(sheet, row, salesArr);
+  setTotalFormulas(sheet, row);
 }
 
 /**
@@ -847,7 +812,7 @@ function checkBatchProgress() {
   }
   
   const totalBatches = Math.ceil(totalGroups / batchSize);
-  const progress = Math.round((processedCount / totalGroups) * 100);
+  const progress = totalGroups > 0 ? Math.round((processedCount / totalGroups) * 100) : 0;
   
   console.log(`バッチ処理進捗:
   - 総数: ${totalGroups}件
@@ -878,7 +843,8 @@ function stopBatchProcessing() {
   
   // キャッシュもクリア
   CacheService.getScriptCache().remove('batchGroupsData');
-  
+  CacheService.getScriptCache().remove('salesCache');
+
   // 個別キャッシュもクリア
   const cacheKeysRaw = CacheService.getScriptCache().get('cacheKeys');
   if (cacheKeysRaw) {
@@ -931,7 +897,7 @@ function resumeBatchProcessing() {
 
 // 初回セットアップ用（手動実行）
 function initialSetup() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const sh = ss.getSheetByName('単価/売上');
   setupDateHeaders(sh);
 }
