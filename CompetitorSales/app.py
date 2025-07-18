@@ -174,25 +174,32 @@ def write_to_dynamodb(url, data):
 
 def get_reservation_data(original_url):
     """Playwrightを使用して、トップページ→予約ページと遷移後に予約情報とプラン情報を取得する関数"""
+    # メモリリークを防ぐため、最初に宣言
+    browser = None
+    page = None
+    
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--single-process",
-                "--no-zygote",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--headless=new",
-                "--disable-http2",
-            ]
-        )
-        context = browser.new_context(
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36'
-        )
-        page = context.new_page()
-
         try:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--single-process",
+                    "--no-zygote",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--headless=new",
+                    "--disable-http2",
+                ]
+            )
+            # コンテキストを作らず、直接ページを作成
+            page = browser.new_page()
+            
+            # user_agentを設定
+            page.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"
+            })
+
             # 1) トップページにアクセス（リダイレクト後の URL を取得）
             resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
             if not resp.ok:
@@ -235,6 +242,10 @@ def get_reservation_data(original_url):
                     space_id = room_fragment.get('id', '')
                     # プラン情報を取得
                     plans_data = room_fragment.get('plans', {}).get('results', [])
+                    
+                    # 大きなJSONオブジェクトを即座に削除
+                    del json_data
+                    
             except Exception as e:
                 print(f"JSON取得エラー: {e}")
                 space_id = ''
@@ -357,4 +368,14 @@ def get_reservation_data(original_url):
         except Exception as e:
             return {'error': str(e)}
         finally:
-            browser.close()
+            # 確実なクリーンアップ（メルカリコードの方式）
+            if page:
+                try:
+                    page.close()
+                except:
+                    pass
+            if browser:
+                try:
+                    browser.close()
+                except:
+                    pass
