@@ -5,6 +5,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 import time
 from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse, parse_qs
 
 # DynamoDB テーブル名
 TABLE_NAME = 'CompetitorSales'
@@ -103,9 +104,15 @@ def write_to_dynamodb(url, data):
     dynamo = boto3.resource('dynamodb')
     table = dynamo.Table(TABLE_NAME)
 
-    # URLからroomIdを抽出
+    # URLからroomIdを抽出（両方のURL形式に対応）
     room_match = re.search(r'/p/([^/?]+)', url)
-    room_uid = room_match.group(1) if room_match else None
+    if room_match:
+        room_uid = room_match.group(1)
+    else:
+        # 新しいURL形式の場合、クエリパラメータから取得
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        room_uid = query_params.get('room_uid', [None])[0]
 
     # spaceId はJSONから取得したものを使用
     space_id = data.get('space_id', 'unknown')
@@ -200,21 +207,49 @@ def get_reservation_data(original_url):
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"
             })
 
-            # 1) トップページにアクセス（リダイレクト後の URL を取得）
-            resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
-            if not resp.ok:
-                return {'error': f"ページロードエラー: {resp.status} {resp.status_text}"}
-            page.wait_for_load_state("networkidle")
-            time.sleep(2)
-
-            # 2) spaceId と roomUid を抽出
-            redirected = page.url  # e.g. https://www.spacemarket.com/spaces/<spaceId>/?...
-            space_match = re.search(r'/spaces/([^/]+)/', redirected)
+            # URL形式を判定して、roomUidとspaceIdを抽出
             room_match = re.search(r'/p/([^/?]+)', original_url)
-            if not space_match or not room_match:
-                return {'error': 'spaceId または roomUid の抽出失敗'}
-            space_id_from_url = space_match.group(1)
-            room_uid = room_match.group(1)
+            space_match_direct = re.search(r'/spaces/([^/?]+)', original_url)
+            
+            if room_match:
+                # 既存の /p/ 形式
+                room_uid = room_match.group(1)
+                
+                # 1) トップページにアクセス（リダイレクト後の URL を取得）
+                resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
+                if not resp.ok:
+                    return {'error': f"ページロードエラー: {resp.status} {resp.status_text}"}
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+
+                # 2) spaceId を抽出
+                redirected = page.url  # e.g. https://www.spacemarket.com/spaces/<spaceId>/?...
+                space_match = re.search(r'/spaces/([^/]+)/', redirected)
+                if not space_match:
+                    return {'error': 'spaceId の抽出失敗'}
+                space_id_from_url = space_match.group(1)
+                
+            elif space_match_direct:
+                # 新しい /spaces/ 形式
+                space_id_from_url = space_match_direct.group(1)
+                
+                # クエリパラメータからroom_uidを取得
+                parsed_url = urlparse(original_url)
+                query_params = parse_qs(parsed_url.query)
+                room_uid = query_params.get('room_uid', [None])[0]
+                
+                if not room_uid:
+                    return {'error': 'room_uid パラメータが見つかりません'}
+                
+                # ページにアクセス（リダイレクトの確認のため）
+                resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
+                if not resp.ok:
+                    return {'error': f"ページロードエラー: {resp.status} {resp.status_text}"}
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+                
+            else:
+                return {'error': '対応していないURL形式です'}
 
             # 3) 予約ページ URL を組み立てて遷移
             reservation_url = (
