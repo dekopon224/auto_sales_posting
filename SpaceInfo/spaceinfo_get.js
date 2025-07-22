@@ -1,9 +1,13 @@
 function fetchSpaceInfoAndUpdateSheet() {
+  // スプレッドシートIDをここで指定します
+  const SPREADSHEET_ID = "1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo";
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
   // 実行環境を判定
-  const isTimeTrigger = !SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const isTimeTrigger = !ss.getActiveSheet();
   
   // シート名を明示的に指定
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('施設情報');
+  const sheet = ss.getSheetByName('施設情報');
   
   // シートが存在しない場合のエラーハンドリング
   if (!sheet) {
@@ -58,8 +62,8 @@ function fetchSpaceInfoAndUpdateSheet() {
 
 /**
  * C列からroom_idを取得する
- * @param {Sheet} sheet - スプレッドシートのシート
- * @returns {Array} room_idの配列
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
+ * @returns {Array<string>} room_idの配列
  */
 function getRoomIds(sheet) {
   const roomIds = [];
@@ -83,8 +87,8 @@ function getRoomIds(sheet) {
 /**
  * APIにPOSTリクエストを送信してスペース情報を取得
  * @param {string} apiUrl - API Gateway URL
- * @param {Array} roomIds - room_idの配列
- * @returns {Object} APIレスポンス
+ * @param {Array<string>} roomIds - room_idの配列
+ * @returns {Object | null} APIレスポンス
  */
 function fetchRoomInfoFromAPI(apiUrl, roomIds) {
   const payload = {
@@ -118,9 +122,9 @@ function fetchRoomInfoFromAPI(apiUrl, roomIds) {
 
 /**
  * スペース情報をスプレッドシートに書き込む
- * @param {Sheet} sheet - スプレッドシートのシート
- * @param {Array} rooms - APIレスポンスのrooms配列
- * @param {Array} originalRoomIds - 元のroom_id順序
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
+ * @param {Array<Object>} rooms - APIレスポンスのrooms配列
+ * @param {Array<string>} originalRoomIds - 元のroom_id順序
  */
 function writeRoomDataToSheet(sheet, rooms, originalRoomIds) {
   // room_idをキーとしたマップを作成（高速検索用）
@@ -165,8 +169,8 @@ function writeRoomDataToSheet(sheet, rooms, originalRoomIds) {
 
 /**
  * 日付ヘッダーをK列〜Q列の1行目に書き込む
- * @param {Sheet} sheet - スプレッドシートのシート
- * @param {Array} dailyPoints - 日付ポイント配列
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
+ * @param {Array<Object>} dailyPoints - 日付ポイント配列
  */
 function writeDateHeaders(sheet, dailyPoints) {
   const headerRow = 1;
@@ -203,7 +207,7 @@ function formatDateHeader(dateStr) {
 
 /**
  * 指定行のスペース情報列をクリア
- * @param {Sheet} sheet - スプレッドシートのシート
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
  */
 function clearRoomInfoInRow(sheet, row) {
@@ -219,9 +223,9 @@ function clearRoomInfoInRow(sheet, row) {
 
 /**
  * 指定行にポイント情報を書き込む（K列〜Q列）
- * @param {Sheet} sheet - スプレッドシートのシート
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
- * @param {Array} dailyPoints - 日付ポイント配列
+ * @param {Array<Object>} dailyPoints - 日付ポイント配列
  */
 function writePointsInRow(sheet, row, dailyPoints) {
   const startCol = 11; // K列 = 11

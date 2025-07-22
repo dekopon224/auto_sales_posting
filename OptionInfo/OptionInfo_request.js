@@ -4,7 +4,7 @@
  */
 function postUrls_optioninfo() {
   // 1. スプレッドシート＆シート取得
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const ss    = SpreadsheetApp.openById("1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo");
   const sheet = ss.getSheetByName("施設情報");
   if (!sheet) {
     throw new Error("シート「施設情報」が見つかりません");
@@ -70,7 +70,7 @@ function postUrls_optioninfo() {
 
 function postUrls_spaceinfo() {
   // 1. スプレッドシート＆シート取得
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const ss    = SpreadsheetApp.openById("1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo");
   const sheet = ss.getSheetByName("施設情報");
   if (!sheet) {
     throw new Error("シート「施設情報」が見つかりません");
@@ -133,7 +133,7 @@ function postUrls_spaceinfo() {
 
 function postUrls_competitorsales() {
   // 1. スプレッドシート＆シート取得
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const ss    = SpreadsheetApp.openById("1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo");
   const sheet = ss.getSheetByName("施設情報");
   if (!sheet) {
     throw new Error("シート「施設情報」が見つかりません");
@@ -188,7 +188,7 @@ function postUrls_competitorsales() {
 
 function postUrls_spacerate() {
   // 1. スプレッドシート＆シート取得
-  const ss    = SpreadsheetApp.getActiveSpreadsheet();
+  const ss    = SpreadsheetApp.openById("1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo");
   const sheet = ss.getSheetByName("施設情報");
   if (!sheet) {
     throw new Error("シート「施設情報」が見つかりません");

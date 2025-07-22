@@ -1,9 +1,13 @@
 function fetchSpaceOptionsAndUpdateSheet() {
+  // スプレッドシートIDをここで指定します
+  const SPREADSHEET_ID = "1YLt2IWtMPjkD9oi7XaF3scInkiffshv1SYnEjlbqoCo";
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+
   // 実行環境を判定
-  const isTimeTrigger = !SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const isTimeTrigger = !ss.getActiveSheet();
   
   // シート名を明示的に指定
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('施設情報');
+  const sheet = ss.getSheetByName('施設情報');
   
   // シートが存在しない場合のエラーハンドリング
   if (!sheet) {
@@ -58,8 +62,8 @@ function fetchSpaceOptionsAndUpdateSheet() {
 
 /**
  * C列からspaceIdを取得する
- * @param {Sheet} sheet - スプレッドシートのシート
- * @returns {Array} spaceIdの配列
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
+ * @returns {Array<string>} spaceIdの配列
  */
 function getSpaceIds(sheet) {
   const spaceIds = [];
@@ -83,8 +87,8 @@ function getSpaceIds(sheet) {
 /**
  * APIにPOSTリクエストを送信してオプション情報を取得
  * @param {string} apiUrl - API Gateway URL
- * @param {Array} spaceIds - spaceIdの配列
- * @returns {Object} APIレスポンス
+ * @param {Array<string>} spaceIds - spaceIdの配列
+ * @returns {Object | null} APIレスポンス
  */
 function fetchOptionsFromAPI(apiUrl, spaceIds) {
   const payload = {
@@ -119,9 +123,9 @@ function fetchOptionsFromAPI(apiUrl, spaceIds) {
 
 /**
  * スペース名とオプション情報をスプレッドシートに書き込む
- * @param {Sheet} sheet - スプレッドシートのシート
- * @param {Array} spaces - APIレスポンスのspaces配列
- * @param {Array} originalSpaceIds - 元のspaceId順序
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
+ * @param {Array<Object>} spaces - APIレスポンスのspaces配列
+ * @param {Array<string>} originalSpaceIds - 元のspaceId順序
  */
 function writeDataToSheet(sheet, spaces, originalSpaceIds) {
   // spaceIdをキーとしたマップを作成（高速検索用）
@@ -130,17 +134,21 @@ function writeDataToSheet(sheet, spaces, originalSpaceIds) {
     spaceMap[space.spaceId] = space;
   });
   
-  // 各行に対してオプション情報を書き込む
+  // 各行に対してスペース名とオプション情報を書き込む
   originalSpaceIds.forEach((spaceId, index) => {
     const row = index + 2; // 2行目から開始
     const space = spaceMap[spaceId];
     
     if (!space || space.error) {
       // エラーまたはデータなしの場合
+      sheet.getRange(row, 2).clearContent(); // B列をクリア
       clearOptionsInRow(sheet, row); // オプション列をクリア
       console.log(`spaceId ${spaceId}: データなしまたはエラー`);
       return;
     }
+    
+    // B列にスペース名を書き込む
+    sheet.getRange(row, 2).setValue(space.name || '');
     
     // オプション情報を書き込む（履歴付き）
     writeOptionsWithHistoryInRow(sheet, row, space.options || [], space.priceHistory || []);
@@ -149,7 +157,7 @@ function writeDataToSheet(sheet, spaces, originalSpaceIds) {
 
 /**
  * 指定行のオプション列をクリア（履歴対応）
- * @param {Sheet} sheet - スプレッドシートのシート
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
  */
 function clearOptionsInRow(sheet, row) {
@@ -178,10 +186,10 @@ function clearOptionsInRow(sheet, row) {
 
 /**
  * 指定行にオプション情報と履歴を書き込む
- * @param {Sheet} sheet - スプレッドシートのシート
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - スプレッドシートのシート
  * @param {number} row - 行番号
- * @param {Array} options - オプション配列
- * @param {Array} priceHistory - 価格履歴配列
+ * @param {Array<Object>} options - オプション配列
+ * @param {Array<Object>} priceHistory - 価格履歴配列
  */
 function writeOptionsWithHistoryInRow(sheet, row, options, priceHistory) {
   // まず既存のオプション列をクリア
