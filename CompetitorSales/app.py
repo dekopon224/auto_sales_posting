@@ -371,18 +371,31 @@ def get_reservation_data(original_url):
                     rr = []
                     start_idx = None
                     for i, (ts, st, nd) in enumerate(availability):
+                        # 予約不可の開始を検出
                         if st == "不可" and (i == 0 or availability[i-1][1] != "不可"):
+                            # 開始が24時以降（翌日）の場合はスキップ
+                            if nd:
+                                start_idx = None  # 明示的にNoneを設定
+                                continue
                             start_idx = i
+                        
+                        # 予約不可の終了を検出して記録
                         if start_idx is not None and (st != "不可" or i == len(availability)-1):
                             end_idx = i if st != "不可" else i+1
+                            
+                            # 開始時刻と終了時刻の処理
                             st_obj = datetime.strptime(availability[start_idx][0], "%H:%M")
                             en_obj = datetime.strptime(availability[end_idx-1][0], "%H:%M") + timedelta(minutes=15)
                             dur = (end_idx - start_idx) * 15
+                            
+                            # 終了が翌日にまたがる場合の日付処理
+                            end_is_next_day = availability[end_idx-1][2] if end_idx-1 < len(availability) else False
+                            
                             rr.append({
-                                'start_date': formatted if not availability[start_idx][2] else f"{(current_date+timedelta(days=1)).month}月{(current_date+timedelta(days=1)).day}日",
-                                'end_date':   formatted if not availability[end_idx-1][2] else f"{(current_date+timedelta(days=1)).month}月{(current_date+timedelta(days=1)).day}日",
+                                'start_date': formatted,  # 開始は必ず当日
+                                'end_date': formatted if not end_is_next_day else f"{(current_date+timedelta(days=1)).month}月{(current_date+timedelta(days=1)).day}日",
                                 'start_time': st_obj.strftime("%H:%M"),
-                                'end_time':   en_obj.strftime("%H:%M"),
+                                'end_time': en_obj.strftime("%H:%M"),
                                 'duration_hours': dur // 60,
                                 'duration_minutes': dur % 60
                             })
