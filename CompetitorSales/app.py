@@ -120,6 +120,10 @@ def write_to_dynamodb(url, data):
     JST = timezone(timedelta(hours=9))
     now_jst = datetime.now(JST)
     
+    # 🔧 TTL設定: 3年後の削除時刻を計算
+    ttl_date = now_jst + timedelta(days=365 * 3)  # 3年後
+    ttl_timestamp = int(ttl_date.timestamp())  # Unix timestamp
+
     # 現在時刻が0時以降か12時以降かを判定
     current_hour = now_jst.hour
     if current_hour < 12:
@@ -180,7 +184,8 @@ def write_to_dynamodb(url, data):
                     'created_at':      now_jst.isoformat(),
                     'processed_at':    now_jst.isoformat(),
                     'url':             data['url'],
-                    'name':            data.get('name', '')
+                    'name':            data.get('name', ''),
+                    'ttl': ttl_timestamp  # 3年後の削除時刻
                 }
                 table.put_item(Item=item)
 
