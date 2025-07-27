@@ -135,8 +135,14 @@ def write_to_dynamodb(url, data):
         plan_id = plan.get('id', '')
 
         for formatted_date, ranges in data['reserved_times'].items():
-            m, d = map(int, re.match(r'(\d+)月(\d+)日', formatted_date).groups())
+            date_match = re.match(r'(\d+)月(\d+)日', formatted_date)
+            if not date_match:
+                continue  # スキップ
+            m, d = map(int, date_match.groups())
+            # 年跨ぎ対応版
             year = now_jst.year
+            if m < now_jst.month or (m == now_jst.month and d < now_jst.day):
+                year += 1  # 翌年として扱う
             reservation_date = f"{year}-{m:02d}-{d:02d}"
 
             for slot in ranges:
@@ -298,41 +304,78 @@ def get_reservation_data(original_url):
             today = datetime.now(timezone(timedelta(hours=9)))
             dates = [today + timedelta(days=i) for i in range(28)]
 
-            # プラン情報取得 （既存ロジック）
+            # プラン情報取得 （フォールバック機能付き）
             plans = []
             try:
-                date_str = f"{today.year}年{today.month}月{today.day}日"
-                page.locator(f'button[aria-label="{date_str}"]').click()
-                time.sleep(2)
-                elems = page.query_selector_all("li.css-1vwbwmt, li.css-1cpdoqx")
-                if not elems:
-                    elems = page.query_selector_all("li button span.css-k6zetj")
-                for i, plan in enumerate(elems):
+                # 最大7日先まで試行
+                plan_acquired = False
+                for fallback_days in range(8):  # 0日後（今日）から7日後まで
+                    target_date = today + timedelta(days=fallback_days)
+                    date_str = f"{target_date.year}年{target_date.month}月{target_date.day}日"
+                    
                     try:
-                        # 価格取得ロジック（優先順位に従って取得）
-                        price = "価格不明"
-                        price_el = plan.query_selector(".css-1y4ezd0")
-                        if price_el:
-                            price = price_el.inner_text()
-                        else:
-                            price_el = plan.query_selector(".css-d362cm")
-                            if price_el:
-                                price = price_el.inner_text()
-                            else:
-                                price_el = plan.query_selector(".css-1sq1blk")
-                                if price_el:
-                                    price = price_el.inner_text()
+                        # 日付ボタンを探す
+                        btn = page.locator(f'button[aria-label="{date_str}"]')
                         
-                        # JSONデータからIDと名前を取得
-                        plan_id = ''
-                        plan_name = ''
-                        if i < len(plans_data):
-                            plan_id = plans_data[i].get('id', '')
-                            plan_name = plans_data[i].get('name', '')
-                        plans.append({'name': plan_name, 'price': price, 'id': plan_id})
-                    except:
-                        pass
-            except:
+                        # ボタンが見つからない場合は次の月に移動してから再度探す
+                        if btn.count() == 0:
+                            nxt = page.locator('button[aria-label="次の月"]')
+                            if nxt.count() > 0:
+                                nxt.click()
+                                time.sleep(1)
+                                btn = page.locator(f'button[aria-label="{date_str}"]')
+                        
+                        # ボタンが見つかった場合はクリックしてプラン情報を取得
+                        if btn.count() > 0:
+                            btn.click()
+                            time.sleep(2)
+                            
+                            # プラン要素を取得
+                            elems = page.query_selector_all("li.css-1vwbwmt, li.css-1cpdoqx")
+                            if not elems:
+                                elems = page.query_selector_all("li button span.css-k6zetj")
+                            
+                            # プランが見つかった場合は処理
+                            if elems:
+                                for i, plan in enumerate(elems):
+                                    try:
+                                        # 価格取得ロジック（優先順位に従って取得）
+                                        price = "価格不明"
+                                        price_el = plan.query_selector(".css-1y4ezd0")
+                                        if price_el:
+                                            price = price_el.inner_text()
+                                        else:
+                                            price_el = plan.query_selector(".css-d362cm")
+                                            if price_el:
+                                                price = price_el.inner_text()
+                                            else:
+                                                price_el = plan.query_selector(".css-1sq1blk")
+                                                if price_el:
+                                                    price = price_el.inner_text()
+                                        
+                                        # JSONデータからIDと名前を取得
+                                        plan_id = ''
+                                        plan_name = ''
+                                        if i < len(plans_data):
+                                            plan_id = plans_data[i].get('id', '')
+                                            plan_name = plans_data[i].get('name', '')
+                                        plans.append({'name': plan_name, 'price': price, 'id': plan_id})
+                                    except:
+                                        pass
+                                
+                                plan_acquired = True
+                                print(f"プラン情報を{fallback_days}日後({target_date.month}月{target_date.day}日)のデータから取得しました")
+                                break  # プラン取得成功で終了
+                                
+                    except Exception as e:
+                        print(f"{fallback_days}日後のプラン取得試行でエラー: {e}")
+                        continue  # 次の日付を試行
+                
+                if not plan_acquired:
+                    print("7日間の試行でもプラン情報を取得できませんでした")
+                    
+            except Exception as e:
+                print(f"プラン情報取得で予期しないエラー: {e}")
                 pass
 
             # 予約状況取得 （既存ロジック）
