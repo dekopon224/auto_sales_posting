@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 from playwright.sync_api import sync_playwright
 import urllib.request
+from urllib.parse import urlparse, parse_qs
 
 # DynamoDB テーブル名は環境変数から取得
 TABLE_NAME = os.environ.get('TABLE_NAME', 'SpaceRate')
@@ -162,21 +163,49 @@ def scrape_hourly_prices(original_url, days=7, offset_days=0):
         page = context.new_page()
         
         try:
-            # 1) トップページにアクセス（リダイレクト後の URL を取得）
-            resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
-            if not resp.ok:
-                raise Exception(f"ページロードエラー: {resp.status} {resp.status_text}")
-            page.wait_for_load_state("networkidle")
-            time.sleep(2)
-
-            # 2) spaceId と roomUid を抽出
-            redirected = page.url  # e.g. https://www.spacemarket.com/spaces/<spaceId>/?...
-            space_match = re.search(r'/spaces/([^/]+)/', redirected)
+            # URL形式を判定して、roomUidとspaceIdを抽出
             room_match = re.search(r'/p/([^/?]+)', original_url)
-            if not space_match or not room_match:
-                raise Exception('spaceId または roomUid の抽出失敗')
-            space_id_from_url = space_match.group(1)
-            room_uid = room_match.group(1)
+            space_match_direct = re.search(r'/spaces/([^/?]+)', original_url)
+            
+            if room_match:
+                # 既存の /p/ 形式
+                room_uid = room_match.group(1)
+                
+                # 1) トップページにアクセス（リダイレクト後の URL を取得）
+                resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
+                if not resp.ok:
+                    raise Exception(f"ページロードエラー: {resp.status} {resp.status_text}")
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+
+                # 2) spaceId を抽出
+                redirected = page.url  # e.g. https://www.spacemarket.com/spaces/<spaceId>/?...
+                space_match = re.search(r'/spaces/([^/]+)/', redirected)
+                if not space_match:
+                    raise Exception('spaceId の抽出失敗')
+                space_id_from_url = space_match.group(1)
+                
+            elif space_match_direct:
+                # 新しい /spaces/ 形式
+                space_id_from_url = space_match_direct.group(1)
+                
+                # クエリパラメータからroom_uidを取得
+                parsed_url = urlparse(original_url)
+                query_params = parse_qs(parsed_url.query)
+                room_uid = query_params.get('room_uid', [None])[0]
+                
+                if not room_uid:
+                    raise Exception('room_uid パラメータが見つかりません')
+                
+                # ページにアクセス（リダイレクトの確認のため）
+                resp = page.goto(original_url, wait_until='networkidle', timeout=90000)
+                if not resp.ok:
+                    raise Exception(f"ページロードエラー: {resp.status} {resp.status_text}")
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+                
+            else:
+                raise Exception('対応していないURL形式です')
 
             # 3) 予約ページ URL を組み立てて遷移
             reservation_url = (
